@@ -1,0 +1,2819 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Chippy's Crossing</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; overflow: hidden; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+// ============================================================
+// CHIPPY'S CROSSING — Forest Edition
+// ============================================================
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+// --- Constants ---
+const TILE = 64;
+const COLS = 9;
+const VISIBLE_ROWS = 14;
+let W, H, scale = 1;
+
+function resize() {
+    const aspect = (COLS * TILE) / (VISIBLE_ROWS * TILE);
+    if (window.innerWidth / window.innerHeight > aspect) {
+        H = window.innerHeight;
+        W = H * aspect;
+    } else {
+        W = window.innerWidth;
+        H = W / aspect;
+    }
+    canvas.width = W;
+    canvas.height = H;
+    scale = W / (COLS * TILE);
+}
+resize();
+window.addEventListener('resize', resize);
+
+// --- Game State Machine ---
+let gameState = 'menu'; // 'menu' | 'playing' | 'gameover' | 'shop'
+let showHowToPlay = false;
+let soundEnabled = localStorage.getItem('chippy_sound') !== 'false';
+let acornWallet = parseInt(localStorage.getItem('chippy_acorns') || '0');
+let purchasedLives = 0;
+const LIFE_COSTS = [10, 20, 30]; // cost for 1st, 2nd, 3rd life
+const MAX_LIVES = 3;
+let showCodePopup = false;
+let codeInput = '';
+let codeMessage = ''; // '', 'success', 'wrong'
+let codeMessageTime = 0;
+let codeReward = 0;
+let codeStep = 'code'; // 'code' | 'amount'
+const VALID_CODE = 'CHIPPY';
+let menuTime = performance.now() / 1000;
+let leaves = []; // menu leaf particles
+
+function initLeaves() {
+    leaves = [];
+    for (let i = 0; i < 20; i++) {
+        leaves.push({
+            x: Math.random() * COLS * TILE,
+            y: Math.random() * VISIBLE_ROWS * TILE,
+            vx: 0.3 + Math.random() * 0.6,
+            vy: 0.5 + Math.random() * 0.8,
+            rot: Math.random() * Math.PI * 2,
+            rotV: (Math.random() - 0.5) * 3,
+            size: 3 + Math.random() * 4,
+            color: ['#8b6b3a','#a07840','#6b8a30','#c08040','#7a5c30'][Math.floor(Math.random() * 5)],
+        });
+    }
+}
+initLeaves();
+
+function startGame() {
+    gameState = 'playing';
+    showHowToPlay = false;
+    initGame();
+    game.lives = purchasedLives;
+    game.invincible = 0;
+    purchasedLives = 0;
+    ensureAudio();
+    startAmbient();
+}
+
+function toggleSound() {
+    soundEnabled = !soundEnabled;
+    localStorage.setItem('chippy_sound', soundEnabled.toString());
+}
+
+function submitCode() {
+    if (codeStep === 'code') {
+        const code = codeInput.trim().toUpperCase();
+        if (code === VALID_CODE) {
+            codeStep = 'amount';
+            codeInput = '';
+            codeMessage = '';
+        } else {
+            codeMessage = 'wrong';
+            codeMessageTime = performance.now() / 1000;
+        }
+    } else if (codeStep === 'amount') {
+        const num = parseInt(codeInput.trim());
+        if (!isNaN(num) && num > 0) {
+            acornWallet += num;
+            localStorage.setItem('chippy_acorns', acornWallet.toString());
+            codeMessage = 'success';
+            codeReward = num;
+            codeMessageTime = performance.now() / 1000;
+            playCoin();
+        } else {
+            codeMessage = 'wrong';
+            codeMessageTime = performance.now() / 1000;
+        }
+    }
+}
+
+// --- Audio Engine (Web Audio API) ---
+const AudioCtx = window.AudioContext || window.webkitAudioContext;
+let audioCtx = null;
+
+function ensureAudio() {
+    if (!audioCtx) audioCtx = new AudioCtx();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+}
+
+function playHop() {
+    if (!soundEnabled) return;
+    ensureAudio();
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = 'square';
+    o.frequency.setValueAtTime(600, audioCtx.currentTime);
+    o.frequency.exponentialRampToValueAtTime(900, audioCtx.currentTime + 0.05);
+    g.gain.setValueAtTime(0.15, audioCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.08);
+    o.connect(g).connect(audioCtx.destination);
+    o.start(); o.stop(audioCtx.currentTime + 0.08);
+}
+
+function playCoin() {
+    if (!soundEnabled) return;
+    ensureAudio();
+    const t = audioCtx.currentTime;
+    const o1 = audioCtx.createOscillator();
+    const o2 = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o1.type = 'sine'; o1.frequency.value = 880;
+    o2.type = 'sine'; o2.frequency.value = 1320;
+    g.gain.setValueAtTime(0.15, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
+    o1.connect(g); o2.connect(g); g.connect(audioCtx.destination);
+    o1.start(t); o1.stop(t + 0.12);
+    o2.start(t + 0.1); o2.stop(t + 0.25);
+}
+
+function playDeath() {
+    if (!soundEnabled) return;
+    ensureAudio();
+    const t = audioCtx.currentTime;
+    for (let i = 0; i < 3; i++) {
+        const o = audioCtx.createOscillator();
+        const g = audioCtx.createGain();
+        o.type = 'sawtooth';
+        o.frequency.setValueAtTime(400 - i * 80, t + i * 0.15);
+        o.frequency.exponentialRampToValueAtTime(200 - i * 40, t + i * 0.15 + 0.14);
+        g.gain.setValueAtTime(0.12, t + i * 0.15);
+        g.gain.exponentialRampToValueAtTime(0.001, t + i * 0.15 + 0.14);
+        o.connect(g).connect(audioCtx.destination);
+        o.start(t + i * 0.15); o.stop(t + i * 0.15 + 0.15);
+    }
+}
+
+function playHiss() {
+    if (!soundEnabled) return;
+    ensureAudio();
+    const t = audioCtx.currentTime;
+    const bufSize = audioCtx.sampleRate * 0.3;
+    const buf = audioCtx.createBuffer(1, bufSize, audioCtx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < bufSize; i++) data[i] = (Math.random() * 2 - 1) * 0.2;
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    const filt = audioCtx.createBiquadFilter();
+    filt.type = 'highpass'; filt.frequency.value = 3000; filt.Q.value = 1;
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(0.1, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
+    src.connect(filt).connect(g).connect(audioCtx.destination);
+    src.start(t); src.stop(t + 0.3);
+}
+
+function playStampede() {
+    if (!soundEnabled) return;
+    ensureAudio();
+    const t = audioCtx.currentTime;
+    // Low rumble for deer stampede
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = 'sawtooth';
+    o.frequency.setValueAtTime(80, t);
+    o.frequency.linearRampToValueAtTime(60, t + 0.6);
+    g.gain.setValueAtTime(0.1, t);
+    g.gain.linearRampToValueAtTime(0.001, t + 0.7);
+    o.connect(g).connect(audioCtx.destination);
+    o.start(t); o.stop(t + 0.7);
+    // Hoofbeat clicks
+    for (let i = 0; i < 4; i++) {
+        const o2 = audioCtx.createOscillator();
+        const g2 = audioCtx.createGain();
+        o2.type = 'square';
+        o2.frequency.value = 200;
+        g2.gain.setValueAtTime(0.06, t + i * 0.12);
+        g2.gain.exponentialRampToValueAtTime(0.001, t + i * 0.12 + 0.04);
+        o2.connect(g2).connect(audioCtx.destination);
+        o2.start(t + i * 0.12); o2.stop(t + i * 0.12 + 0.05);
+    }
+}
+
+// Ambient background sound
+let ambientRunning = false;
+function startAmbient() {
+    if (ambientRunning || !soundEnabled) return;
+    ensureAudio();
+    ambientRunning = true;
+    // Forest wind through trees
+    const bufSize = audioCtx.sampleRate * 2;
+    const buf = audioCtx.createBuffer(1, bufSize, audioCtx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < bufSize; i++) data[i] = (Math.random() * 2 - 1);
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf; src.loop = true;
+    const filt = audioCtx.createBiquadFilter();
+    filt.type = 'lowpass'; filt.frequency.value = 350;
+    const g = audioCtx.createGain(); g.gain.value = 0.025;
+    src.connect(filt).connect(g).connect(audioCtx.destination);
+    src.start();
+
+    // Bird chirp loop
+    function chirp() {
+        if (!ambientRunning) return;
+        const t = audioCtx.currentTime;
+        const o = audioCtx.createOscillator();
+        const gn = audioCtx.createGain();
+        o.type = 'sine';
+        o.frequency.setValueAtTime(1800 + Math.random() * 1200, t);
+        o.frequency.exponentialRampToValueAtTime(1200 + Math.random() * 800, t + 0.1);
+        gn.gain.setValueAtTime(0.02, t);
+        gn.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+        o.connect(gn).connect(audioCtx.destination);
+        o.start(t); o.stop(t + 0.12);
+        setTimeout(chirp, 1500 + Math.random() * 4000);
+    }
+    setTimeout(chirp, 800);
+
+    // Occasional cricket chirp
+    function cricket() {
+        if (!ambientRunning) return;
+        const t = audioCtx.currentTime;
+        for (let i = 0; i < 3; i++) {
+            const o = audioCtx.createOscillator();
+            const gn = audioCtx.createGain();
+            o.type = 'sine';
+            o.frequency.value = 4500 + Math.random() * 500;
+            gn.gain.setValueAtTime(0.01, t + i * 0.06);
+            gn.gain.exponentialRampToValueAtTime(0.001, t + i * 0.06 + 0.04);
+            o.connect(gn).connect(audioCtx.destination);
+            o.start(t + i * 0.06); o.stop(t + i * 0.06 + 0.05);
+        }
+        setTimeout(cricket, 3000 + Math.random() * 8000);
+    }
+    setTimeout(cricket, 2000);
+}
+
+// --- Seeded RNG for procedural generation ---
+function mulberry32(a) {
+    return function() {
+        a |= 0; a = a + 0x6D2B79F5 | 0;
+        let t = Math.imul(a ^ a >>> 15, 1 | a);
+        t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+        return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+}
+
+// --- Game State ---
+let game = {};
+
+function initGame() {
+    const seed = Date.now();
+    game = {
+        rng: mulberry32(seed),
+        player: { col: 4, row: 0, x: 4 * TILE, y: 0, targetX: 4 * TILE, targetY: 0, hopping: false, hopTime: 0, hopDuration: 0.12, hopDir: {dx:0,dy:0}, alive: true, idleTime: 0 },
+        rows: {},
+        score: 0,
+        highestRow: 0,
+        coins: 0, // acorns
+        coinPositions: {},
+        gameOver: false,
+        gameOverTime: 0,
+        deathType: '',
+        cameraY: 0,
+        targetCameraY: 0,
+        eagleActive: false, // hawk for forest
+        eagleX: -100,
+        eagleY: 0,
+        eagleTime: 0,
+        lastMoveTime: performance.now() / 1000,
+        startTime: performance.now() / 1000,
+    };
+    for (let r = -5; r < VISIBLE_ROWS + 10; r++) {
+        getRow(r);
+    }
+    // Ensure spawn tile (col 4, row 0) is not blocked by a tree
+    const spawnRow = game.rows[0];
+    if (spawnRow && spawnRow.treePositions) {
+        spawnRow.treePositions = spawnRow.treePositions.filter(t => t.col !== 4);
+    }
+}
+
+function getRow(r) {
+    if (game.rows[r]) return game.rows[r];
+    const row = generateRow(r);
+    game.rows[r] = row;
+    return row;
+}
+
+function generateRow(r) {
+    const rng = game.rng;
+    if (r <= 0) return { type: 'forest', objects: [], coins: [], treePositions: generateTrees(r, rng) };
+
+    // Determine row type — avoid >3 hazards in a row
+    let hazardCount = 0;
+    for (let i = 1; i <= 3; i++) {
+        const prev = game.rows[r - i];
+        if (prev && prev.type !== 'forest') hazardCount++;
+        else break;
+    }
+
+    let type;
+    if (hazardCount >= 3) {
+        type = 'forest';
+    } else {
+        const roll = rng();
+        if (roll < 0.25) type = 'forest';        // safe forest floor
+        else if (roll < 0.6) type = 'dirtpath';   // fire ants & snakes
+        else if (roll < 0.72) type = 'stampede';   // deer stampede (replaces railroad)
+        else if (roll < 0.9) type = 'river';
+        else type = 'lilypad';
+    }
+
+    const row = { type, objects: [], coins: [], treePositions: [] };
+
+    if (type === 'forest') {
+        row.treePositions = generateTrees(r, rng);
+    }
+
+    if (type === 'dirtpath') {
+        const dir = rng() < 0.5 ? 1 : -1;
+        const speed = 0.8 + rng() * 2;
+        const critterCount = 2 + Math.floor(rng() * 3);
+        const isSnake = rng() < 0.4;
+
+        for (let i = 0; i < critterCount; i++) {
+            if (isSnake) {
+                row.objects.push({
+                    x: (i * (COLS + 2) / critterCount + rng() * 2) * TILE,
+                    speed: speed * dir * 0.7,
+                    width: 2 * TILE,
+                    isSnake: true,
+                    color: rng() < 0.5 ? '#5a7a2e' : '#8b4513', // green or brown snake
+                    waveOffset: rng() * Math.PI * 2,
+                });
+            } else {
+                // Fire ant column
+                row.objects.push({
+                    x: (i * (COLS + 2) / critterCount + rng() * 2) * TILE,
+                    speed: speed * dir,
+                    width: 1.5 * TILE,
+                    isSnake: false,
+                    isAnt: true,
+                });
+            }
+        }
+    } else if (type === 'stampede') {
+        row.trainActive = false;
+        row.trainWarning = false;
+        row.trainX = -COLS * TILE * 2;
+        row.trainSpeed = 12 * TILE;
+        row.trainDir = rng() < 0.5 ? 1 : -1;
+        row.trainTimer = 3 + rng() * 5;
+        row.warningTimer = 0;
+        row.deerCount = 4 + Math.floor(rng() * 4);
+    } else if (type === 'river') {
+        const dir = rng() < 0.5 ? 1 : -1;
+        const speed = 0.8 + rng() * 1.5;
+        const logCount = 2 + Math.floor(rng() * 2);
+        const logLen = 2 + Math.floor(rng() * 2);
+        for (let i = 0; i < logCount; i++) {
+            row.objects.push({
+                x: (i * (COLS + 3) / logCount + rng() * 2) * TILE,
+                speed: speed * dir,
+                width: logLen * TILE,
+                isLog: true,
+            });
+        }
+    } else if (type === 'lilypad') {
+        const dir = rng() < 0.5 ? 1 : -1;
+        const speed = 0.4 + rng() * 0.8;
+        for (let c = 0; c < COLS; c++) {
+            if (rng() < 0.45) {
+                const isMoving = rng() < 0.4;
+                row.objects.push({
+                    x: c * TILE,
+                    baseX: c * TILE,
+                    speed: isMoving ? speed * dir : 0,
+                    width: TILE * 0.8,
+                    isLilypad: true,
+                    isMoving: isMoving,
+                });
+            }
+        }
+    }
+
+    // Scatter acorns on forest floor and dirt paths
+    if (type === 'forest' || type === 'dirtpath') {
+        for (let c = 0; c < COLS; c++) {
+            if (rng() < 0.07) {
+                row.coins.push({ col: c, collected: false });
+            }
+        }
+    }
+
+    return row;
+}
+
+function generateTrees(r, rng) {
+    const trees = [];
+    for (let c = 0; c < COLS; c++) {
+        if (rng() < 0.18) {
+            trees.push({ col: c, size: 0.6 + rng() * 0.5, type: rng() < 0.5 ? 'pine' : 'oak' });
+        }
+    }
+    return trees;
+}
+
+// --- Input Handling ---
+const keys = {};
+let inputQueue = [];
+
+function queueMove(dx, dy) {
+    inputQueue.push({dx, dy});
+}
+
+// Convert canvas click position to canvas-space coordinates
+function canvasCoords(e) {
+    const rect = canvas.getBoundingClientRect();
+    return { x: (e.clientX - rect.left) * (canvas.width / rect.width), y: (e.clientY - rect.top) * (canvas.height / rect.height) };
+}
+
+// Check if point is inside a rect
+function hitTest(px, py, rx, ry, rw, rh) {
+    return px >= rx && px <= rx + rw && py >= ry && py <= ry + rh;
+}
+
+// Sound toggle button bounds (drawn in top-right area during gameplay/gameover, or on menu)
+function getSoundBtnBounds() {
+    const sz = 28 * scale;
+    return { x: W - 12 * scale - sz, y: H - 12 * scale - sz, w: sz, h: sz };
+}
+
+window.addEventListener('keydown', e => {
+    if (gameState === 'menu') {
+        if (e.key === ' ' || e.key === 'Enter') { startGame(); return; }
+        if (e.key === 'm' || e.key === 'M') { toggleSound(); return; }
+        return;
+    }
+    if (gameState === 'shop') {
+        if (showCodePopup) {
+            if (e.key === 'Escape') { showCodePopup = false; codeInput = ''; codeMessage = ''; codeStep = 'code'; return; }
+            if (e.key === 'Enter') { submitCode(); return; }
+            if (e.key === 'Backspace') { codeInput = codeInput.slice(0, -1); return; }
+            if (e.key.length === 1 && codeInput.length < 20) { codeInput += e.key.toUpperCase(); return; }
+            return;
+        }
+        if (e.key === 'Escape') { gameState = 'menu'; initLeaves(); return; }
+        return;
+    }
+    if (gameState === 'gameover') {
+        if (e.key === ' ' || e.key === 'Enter') { startGame(); return; }
+        if (e.key === 'Escape') { gameState = 'menu'; initLeaves(); return; }
+        if (e.key === 'm' || e.key === 'M') { toggleSound(); return; }
+        return;
+    }
+    if (keys[e.key]) return;
+    keys[e.key] = true;
+    if (e.key === 'm' || e.key === 'M') { toggleSound(); return; }
+    ensureAudio(); startAmbient();
+    switch(e.key) {
+        case 'ArrowUp': case 'w': case 'W': queueMove(0, 1); break;
+        case 'ArrowDown': case 's': case 'S': queueMove(0, -1); break;
+        case 'ArrowLeft': case 'a': case 'A': queueMove(-1, 0); break;
+        case 'ArrowRight': case 'd': case 'D': queueMove(1, 0); break;
+    }
+});
+window.addEventListener('keyup', e => { keys[e.key] = false; });
+
+// Touch controls
+let touchStartX = 0, touchStartY = 0, touchStartTime = 0;
+canvas.addEventListener('touchstart', e => {
+    e.preventDefault();
+    if (gameState === 'menu' || gameState === 'gameover' || gameState === 'shop') return;
+    ensureAudio(); startAmbient();
+    const t = e.touches[0];
+    touchStartX = t.clientX; touchStartY = t.clientY;
+    touchStartTime = performance.now();
+});
+canvas.addEventListener('touchend', e => {
+    e.preventDefault();
+    if (gameState === 'menu' || gameState === 'gameover' || gameState === 'shop') return;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - touchStartX;
+    const dy = t.clientY - touchStartY;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    const elapsed = performance.now() - touchStartTime;
+
+    if (dist < 20 || elapsed < 150) {
+        queueMove(0, 1);
+    } else if (Math.abs(dx) > Math.abs(dy)) {
+        queueMove(dx > 0 ? 1 : -1, 0);
+    } else {
+        queueMove(0, dy < 0 ? 1 : -1);
+    }
+});
+
+canvas.addEventListener('click', e => {
+    const pos = canvasCoords(e);
+    const sndBtn = getSoundBtnBounds();
+
+    // Sound toggle — available on all screens
+    if (hitTest(pos.x, pos.y, sndBtn.x, sndBtn.y, sndBtn.w, sndBtn.h)) {
+        toggleSound();
+        return;
+    }
+
+    if (gameState === 'menu') {
+        // Play button
+        const btnW = 180 * scale;
+        const btnH = 50 * scale;
+        const btnX = W / 2 - btnW / 2;
+        const btnY = H * 0.52;
+        if (hitTest(pos.x, pos.y, btnX, btnY, btnW, btnH)) {
+            startGame();
+            return;
+        }
+        // How to Play button
+        const htpBtnW = 180 * scale;
+        const htpBtnH = 46 * scale;
+        const htpBtnX = W / 2 - htpBtnW / 2;
+        const htpBtnY = H * 0.66;
+        if (hitTest(pos.x, pos.y, htpBtnX, htpBtnY, htpBtnW, htpBtnH)) {
+            showHowToPlay = !showHowToPlay;
+            return;
+        }
+        // Shop button
+        const shopBtnW = 180 * scale;
+        const shopBtnH = 46 * scale;
+        const shopBtnX = W / 2 - shopBtnW / 2;
+        const shopBtnY = H * 0.76;
+        if (hitTest(pos.x, pos.y, shopBtnX, shopBtnY, shopBtnW, shopBtnH)) {
+            gameState = 'shop';
+            return;
+        }
+        // Sound toggle switch on menu
+        const swY = H * 0.87 + 18 * scale;
+        const swTrackW = 56 * scale;
+        const swTrackH = 28 * scale;
+        const swTrackX = W / 2 + 2 * scale;
+        // Expand hitbox to include the label too
+        const swHitX = W / 2 - 60 * scale;
+        const swHitW = 60 * scale + swTrackW + 4 * scale;
+        if (hitTest(pos.x, pos.y, swHitX, swY - swTrackH / 2, swHitW, swTrackH)) {
+            toggleSound();
+        }
+        return;
+    }
+    if (gameState === 'shop') {
+        // Code popup takes priority
+        if (showCodePopup) {
+            const popW = W * 0.8;
+            const popH = 220 * scale;
+            const popY = H / 2 - popH / 2;
+            const inputH = 36 * scale;
+            const inputY = popY + 55 * scale;
+
+            // Submit button
+            const subW = 120 * scale;
+            const subH = 38 * scale;
+            const subX = W / 2 - subW / 2;
+            const subY = inputY + inputH + 15 * scale;
+            if (hitTest(pos.x, pos.y, subX, subY, subW, subH)) {
+                submitCode();
+                return;
+            }
+            // Cancel button
+            const canW = 100 * scale;
+            const canH = 32 * scale;
+            const canX = W / 2 - canW / 2;
+            const canY = subY + subH + 12 * scale;
+            if (hitTest(pos.x, pos.y, canX, canY, canW, canH)) {
+                showCodePopup = false;
+                codeInput = '';
+                codeMessage = '';
+                codeStep = 'code';
+            }
+            return; // block clicks behind popup
+        }
+
+        // Buy life button
+        if (purchasedLives < MAX_LIVES) {
+            const cost = LIFE_COSTS[purchasedLives];
+            const buyBtnW = 200 * scale;
+            const buyBtnH = 56 * scale;
+            const buyBtnX = W / 2 - buyBtnW / 2;
+            const buyBtnY = H * 0.42;
+            if (acornWallet >= cost && hitTest(pos.x, pos.y, buyBtnX, buyBtnY, buyBtnW, buyBtnH)) {
+                acornWallet -= cost;
+                localStorage.setItem('chippy_acorns', acornWallet.toString());
+                purchasedLives++;
+                playCoin();
+                return;
+            }
+        }
+        // Redeem Code button
+        const codeBtnW = 180 * scale;
+        const codeBtnH = 40 * scale;
+        const codeBtnX = W / 2 - codeBtnW / 2;
+        const codeBtnY = H * 0.62;
+        if (hitTest(pos.x, pos.y, codeBtnX, codeBtnY, codeBtnW, codeBtnH)) {
+            showCodePopup = true;
+            codeInput = '';
+            codeStep = 'code';
+            codeMessage = '';
+            return;
+        }
+        // Back button
+        const backBtnW = 150 * scale;
+        const backBtnH = 46 * scale;
+        const backBtnX = W / 2 - backBtnW / 2;
+        const backBtnY = H * 0.85;
+        if (hitTest(pos.x, pos.y, backBtnX, backBtnY, backBtnW, backBtnH)) {
+            gameState = 'menu';
+            initLeaves();
+        }
+        return;
+    }
+    if (gameState === 'gameover') {
+        // Try again button
+        const btnW = 160 * scale;
+        const btnH = 44 * scale;
+        const btnX = W / 2 - btnW / 2;
+        const btnY = H * 0.80;
+        if (hitTest(pos.x, pos.y, btnX, btnY, btnW, btnH)) {
+            startGame();
+        }
+        // Menu button
+        const menuBtnW = 160 * scale;
+        const menuBtnH = 36 * scale;
+        const menuBtnX = W / 2 - menuBtnW / 2;
+        const menuBtnY = btnY + btnH + 12 * scale;
+        if (hitTest(pos.x, pos.y, menuBtnX, menuBtnY, menuBtnW, menuBtnH)) {
+            gameState = 'menu';
+            initLeaves();
+        }
+        return;
+    }
+});
+
+// --- Update ---
+let lastTime = performance.now() / 1000;
+
+function update(now) {
+    const dt = Math.min(now - lastTime, 0.05);
+    lastTime = now;
+    const p = game.player;
+
+    // Let hawk finish flying off-screen even after game over
+    if (game.eagleActive) {
+        game.eagleTime += dt;
+        const hawkSpeed = TILE * 5;
+        const hdx = game.eagleTargetX - game.eagleX;
+        const hdy = game.eagleTargetY - game.eagleY;
+        const hdist = Math.sqrt(hdx * hdx + hdy * hdy);
+        if (hdist > 2) {
+            game.eagleX += (hdx / hdist) * hawkSpeed * dt;
+            game.eagleY += (hdy / hdist) * hawkSpeed * dt;
+        } else {
+            game.eagleX += hawkSpeed * dt;
+        }
+        if (game.eagleX > COLS * TILE + TILE * 4) {
+            game.eagleActive = false;
+        }
+    }
+
+    if (game.gameOver) return;
+
+    // Invincibility timer
+    if (game.invincible > 0) game.invincible -= dt;
+
+    // Process input
+    if (!p.hopping && inputQueue.length > 0 && p.alive) {
+        const move = inputQueue.shift();
+        const newCol = p.col + move.dx;
+        const newRow = p.row + move.dy;
+
+        // Bounds check — also block movement into trees
+        let blocked = false;
+        if (newCol < 0 || newCol >= COLS) blocked = true;
+
+        // Check for tree collision on target row
+        if (!blocked) {
+            const targetRow = game.rows[newRow] || getRow(newRow);
+            if (targetRow && targetRow.treePositions) {
+                for (const tree of targetRow.treePositions) {
+                    if (tree.col === newCol) { blocked = true; break; }
+                }
+            }
+        }
+
+        if (!blocked) {
+            p.col = newCol;
+            p.row = newRow;
+            p.hopDir = move;
+            p.hopping = true;
+            p.hopTime = 0;
+            p.targetX = p.col * TILE;
+            p.targetY = p.row * TILE;
+            p.idleTime = 0;
+            game.lastMoveTime = now;
+
+            if (move.dy > 0 && p.row > game.highestRow) {
+                game.highestRow = p.row;
+                game.score = game.highestRow;
+            }
+
+            for (let r = p.row - 5; r < p.row + VISIBLE_ROWS + 10; r++) {
+                getRow(r);
+            }
+
+            playHop();
+        }
+    }
+
+    // Hop animation
+    if (p.hopping) {
+        p.hopTime += dt;
+        const t = Math.min(p.hopTime / p.hopDuration, 1);
+        const prevX = p.targetX - p.hopDir.dx * TILE;
+        const prevY = p.targetY - p.hopDir.dy * TILE;
+        p.x = prevX + (p.targetX - prevX) * t;
+        p.y = prevY + (p.targetY - prevY) * t;
+        if (t >= 1) {
+            p.hopping = false;
+            p.x = p.targetX;
+            p.y = p.targetY;
+            inputQueue = [];
+        }
+    }
+
+    // Camera follow
+    game.targetCameraY = p.row * TILE - 8 * TILE;
+    game.cameraY += (game.targetCameraY - game.cameraY) * 6 * dt;
+
+    // Idle timer (hawk)
+    if (p.alive && !p.hopping) {
+        p.idleTime += dt;
+        if (p.idleTime > 7 && !game.eagleActive) {
+            game.eagleActive = true;
+            // Swoop from off-screen left toward player's current position
+            game.eagleX = -TILE * 4;
+            game.eagleY = p.y;
+            game.eagleTargetX = p.x; // lock target to where player was standing
+            game.eagleTargetY = p.y;
+            game.eagleTime = 0;
+        }
+    }
+
+    // Hawk collision check (movement handled above gameOver check so it keeps flying)
+    if (game.eagleActive && p.alive) {
+        const hitDist = Math.sqrt((game.eagleX - p.x) ** 2 + (game.eagleY - p.y) ** 2);
+        if (hitDist < TILE * 0.7 && game.invincible <= 0) {
+            die('hawk');
+        }
+        // Eagle flies off screen — despawn and reset idle timer
+        if (game.eagleX > COLS * TILE + TILE * 4) {
+            game.eagleActive = false;
+            p.idleTime = 0;
+        }
+    }
+
+    // Update row objects
+    const minRow = Math.floor(game.cameraY / TILE) - 2;
+    const maxRow = minRow + VISIBLE_ROWS + 6;
+
+    for (let r = minRow; r <= maxRow; r++) {
+        const row = game.rows[r];
+        if (!row) continue;
+
+        if (row.type === 'dirtpath') {
+            for (const v of row.objects) {
+                v.x += v.speed * TILE * dt;
+                if (v.speed > 0 && v.x > COLS * TILE + TILE) v.x = -v.width - TILE;
+                if (v.speed < 0 && v.x + v.width < -TILE) v.x = COLS * TILE + TILE;
+            }
+        } else if (row.type === 'stampede') {
+            if (!row.trainActive && !row.trainWarning) {
+                row.trainTimer -= dt;
+                if (row.trainTimer <= 0) {
+                    row.trainWarning = true;
+                    row.warningTimer = 1.2;
+                    playStampede();
+                }
+            }
+            if (row.trainWarning) {
+                row.warningTimer -= dt;
+                if (row.warningTimer <= 0) {
+                    row.trainActive = true;
+                    row.trainWarning = false;
+                    row.trainX = row.trainDir > 0 ? -COLS * TILE * 2 : COLS * TILE * 2;
+                }
+            }
+            if (row.trainActive) {
+                row.trainX += row.trainSpeed * row.trainDir * dt;
+                if (row.trainDir > 0 && row.trainX > COLS * TILE * 2) {
+                    row.trainActive = false;
+                    row.trainTimer = 4 + Math.random() * 6;
+                }
+                if (row.trainDir < 0 && row.trainX < -COLS * TILE * 2) {
+                    row.trainActive = false;
+                    row.trainTimer = 4 + Math.random() * 6;
+                }
+            }
+        } else if (row.type === 'river') {
+            for (const log of row.objects) {
+                log.x += log.speed * TILE * dt;
+                if (log.speed > 0 && log.x > COLS * TILE + TILE) log.x = -log.width - TILE;
+                if (log.speed < 0 && log.x + log.width < -TILE) log.x = COLS * TILE + TILE;
+            }
+        } else if (row.type === 'lilypad') {
+            for (const pad of row.objects) {
+                if (pad.isMoving) {
+                    pad.x += pad.speed * TILE * dt;
+                    if (pad.speed > 0 && pad.x > COLS * TILE) pad.x = -pad.width;
+                    if (pad.speed < 0 && pad.x + pad.width < 0) pad.x = COLS * TILE;
+                }
+            }
+        }
+    }
+
+    // Collision detection — hazards that move INTO you check every frame (even mid-hop)
+    if (p.alive) {
+        const px = p.x + TILE * 0.2;
+        const pw = TILE * 0.6;
+
+        // Check the row the player is currently on (target row during hop)
+        const row = game.rows[p.row];
+
+        // Dirtpath critters and stampede can hit you mid-hop
+        if (row) {
+            if (row.type === 'dirtpath' && game.invincible <= 0) {
+                for (const v of row.objects) {
+                    if (px + pw > v.x && px < v.x + v.width) {
+                        die(v.isSnake ? 'snake' : 'ants');
+                        playHiss();
+                        return;
+                    }
+                }
+            }
+            if (row.type === 'stampede' && row.trainActive && game.invincible <= 0) {
+                if (row.trainX < COLS * TILE && row.trainX + COLS * TILE * 1.5 > 0) {
+                    die('stampede');
+                    return;
+                }
+            }
+        }
+
+        // Also check the row the player is hopping FROM (they pass through it)
+        if (p.hopping && p.hopDir.dy !== 0) {
+            const fromRow = game.rows[p.row - p.hopDir.dy];
+            if (fromRow) {
+                if (fromRow.type === 'dirtpath' && game.invincible <= 0) {
+                    for (const v of fromRow.objects) {
+                        if (px + pw > v.x && px < v.x + v.width) {
+                            die(v.isSnake ? 'snake' : 'ants');
+                            playHiss();
+                            return;
+                        }
+                    }
+                }
+                if (fromRow.type === 'stampede' && fromRow.trainActive && game.invincible <= 0) {
+                    if (fromRow.trainX < COLS * TILE && fromRow.trainX + COLS * TILE * 1.5 > 0) {
+                        die('stampede');
+                        return;
+                    }
+                }
+            }
+        }
+
+        // River, lilypad, acorns, and behind-camera only check when standing still
+        if (!p.hopping && row) {
+            if (row.type === 'river' && game.invincible <= 0) {
+                let onLog = false;
+                for (const log of row.objects) {
+                    if (px + pw > log.x && px < log.x + log.width) {
+                        onLog = true;
+                        p.x += log.speed * TILE * dt;
+                        p.col = Math.round(p.x / TILE);
+                        p.targetX = p.x;
+                        if (p.x < -TILE || p.x > COLS * TILE) {
+                            die('water');
+                            return;
+                        }
+                        break;
+                    }
+                }
+                if (!onLog) {
+                    die('water');
+                    return;
+                }
+            } else if (row.type === 'lilypad' && game.invincible <= 0) {
+                let onPad = false;
+                for (const pad of row.objects) {
+                    const padCx = pad.x + pad.width / 2;
+                    const pCx = p.x + TILE / 2;
+                    if (Math.abs(padCx - pCx) < (pad.width / 2 + TILE * 0.2)) {
+                        onPad = true;
+                        if (pad.isMoving) {
+                            p.x += pad.speed * TILE * dt;
+                            p.col = Math.round(p.x / TILE);
+                            p.targetX = p.x;
+                            if (p.x < -TILE || p.x > COLS * TILE) {
+                                die('water');
+                                return;
+                            }
+                        }
+                        break;
+                    }
+                }
+                if (!onPad) {
+                    die('water');
+                    return;
+                }
+            }
+
+            // Acorn collection
+            if (row.coins) {
+                for (const coin of row.coins) {
+                    if (!coin.collected && coin.col === p.col) {
+                        coin.collected = true;
+                        game.coins++;
+                        playCoin();
+                    }
+                }
+            }
+
+            // Behind camera death
+            if (p.row * TILE < game.cameraY - TILE && game.invincible <= 0) {
+                die('behind');
+            }
+        }
+    }
+
+    // Cleanup far-away rows
+    for (const r in game.rows) {
+        if (Math.abs(r - game.player.row) > VISIBLE_ROWS + 15) {
+            delete game.rows[r];
+        }
+    }
+}
+
+function die(type) {
+    // If we have extra lives, respawn instead of dying
+    if (game.lives > 0) {
+        game.lives--;
+        respawnPlayer();
+        playDeath(); // still play the sound as feedback
+        return;
+    }
+
+    game.player.alive = false;
+    game.deathType = type;
+    game.gameOver = true;
+    game.gameOverTime = lastTime;
+    gameState = 'gameover';
+    playDeath();
+
+    // Save acorns to wallet
+    acornWallet += game.coins;
+    localStorage.setItem('chippy_acorns', acornWallet.toString());
+
+    const best = parseInt(localStorage.getItem('chippy_best') || '0');
+    if (game.score > best) localStorage.setItem('chippy_best', game.score.toString());
+}
+
+function respawnPlayer() {
+    const p = game.player;
+    // Find a safe row near current position
+    let safeRow = p.row;
+    for (let offset = 0; offset <= 5; offset++) {
+        const checkRow = p.row - offset;
+        const row = game.rows[checkRow];
+        if (row && row.type === 'forest') {
+            safeRow = checkRow;
+            break;
+        }
+    }
+    // Find a safe column (not blocked by tree)
+    let safeCol = p.col;
+    const row = game.rows[safeRow];
+    if (row && row.treePositions) {
+        const blocked = new Set(row.treePositions.map(t => t.col));
+        if (blocked.has(safeCol)) {
+            for (let c = 0; c < COLS; c++) {
+                if (!blocked.has(c)) { safeCol = c; break; }
+            }
+        }
+    }
+    p.col = safeCol;
+    p.row = safeRow;
+    p.x = safeCol * TILE;
+    p.y = safeRow * TILE;
+    p.targetX = p.x;
+    p.targetY = p.y;
+    p.alive = true;
+    p.hopping = false;
+    p.idleTime = 0;
+    game.invincible = 2.0; // 2 seconds of invincibility
+    game.eagleActive = false;
+}
+
+// --- Drawing ---
+function getSkyColor(score) {
+    // Forest canopy tones: deep green-blue transitioning to dark
+    const t = Math.min(score / 200, 1);
+    const day = [100, 160, 100];     // green-tinged forest sky
+    const dusk = [180, 120, 60];     // warm amber through trees
+    const night = [15, 25, 20];      // dark forest
+
+    let r, g, b;
+    if (t < 0.5) {
+        const s = t * 2;
+        r = day[0] + (dusk[0] - day[0]) * s;
+        g = day[1] + (dusk[1] - day[1]) * s;
+        b = day[2] + (dusk[2] - day[2]) * s;
+    } else {
+        const s = (t - 0.5) * 2;
+        r = dusk[0] + (night[0] - dusk[0]) * s;
+        g = dusk[1] + (night[1] - dusk[1]) * s;
+        b = dusk[2] + (night[2] - dusk[2]) * s;
+    }
+    return `rgb(${Math.round(r)},${Math.round(g)},${Math.round(b)})`;
+}
+
+function screenY(worldRow) {
+    return H - (worldRow * TILE - game.cameraY) * scale - TILE * scale;
+}
+
+function drawTree(x, sy, rowH, treeInfo) {
+    const s = scale * treeInfo.size;
+    const cx = x * TILE * scale + TILE * scale / 2;
+    const baseY = sy + rowH;
+
+    ctx.save();
+    if (treeInfo.type === 'pine') {
+        // Trunk
+        ctx.fillStyle = '#5c3d1e';
+        ctx.fillRect(cx - 4 * s, baseY - 30 * s, 8 * s, 30 * s);
+        // Pine layers
+        ctx.fillStyle = '#2d5a1e';
+        ctx.beginPath();
+        ctx.moveTo(cx, baseY - 55 * s);
+        ctx.lineTo(cx - 18 * s, baseY - 25 * s);
+        ctx.lineTo(cx + 18 * s, baseY - 25 * s);
+        ctx.fill();
+        ctx.fillStyle = '#357a28';
+        ctx.beginPath();
+        ctx.moveTo(cx, baseY - 70 * s);
+        ctx.lineTo(cx - 14 * s, baseY - 42 * s);
+        ctx.lineTo(cx + 14 * s, baseY - 42 * s);
+        ctx.fill();
+        ctx.fillStyle = '#3d8a30';
+        ctx.beginPath();
+        ctx.moveTo(cx, baseY - 82 * s);
+        ctx.lineTo(cx - 10 * s, baseY - 58 * s);
+        ctx.lineTo(cx + 10 * s, baseY - 58 * s);
+        ctx.fill();
+    } else {
+        // Oak trunk
+        ctx.fillStyle = '#6b4226';
+        ctx.fillRect(cx - 5 * s, baseY - 28 * s, 10 * s, 28 * s);
+        // Canopy (leafy blob)
+        ctx.fillStyle = '#3a7d20';
+        ctx.beginPath();
+        ctx.arc(cx, baseY - 42 * s, 18 * s, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#4a9a2e';
+        ctx.beginPath();
+        ctx.arc(cx - 8 * s, baseY - 38 * s, 12 * s, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(cx + 8 * s, baseY - 38 * s, 12 * s, 0, Math.PI * 2);
+        ctx.fill();
+    }
+    ctx.restore();
+}
+
+function drawRow(r) {
+    const row = getRow(r);
+    const sy = screenY(r);
+    const rowH = TILE * scale;
+
+    const perspectiveT = Math.max(0, Math.min(1, (H - sy) / H));
+    const pScale = 1 - perspectiveT * 0.06;
+
+    ctx.save();
+
+    // Row background
+    switch(row.type) {
+        case 'forest':
+            ctx.fillStyle = r % 2 === 0 ? '#3a6b2a' : '#407530';
+            ctx.fillRect(0, sy, W, rowH + 1);
+            // Forest floor details: fallen leaves, small ferns
+            ctx.fillStyle = '#4a8035';
+            for (let i = 0; i < COLS * 2; i++) {
+                const gx = ((r * 37 + i * 73) % (COLS * 10)) / (COLS * 10) * W;
+                const gh = 5 * scale;
+                // Little fern fronds
+                ctx.fillRect(gx, sy + rowH - gh, 2 * scale, gh);
+                ctx.fillRect(gx - 2 * scale, sy + rowH - gh + 1 * scale, 1 * scale, gh - 2 * scale);
+            }
+            // Mushrooms and leaves
+            ctx.fillStyle = '#8b6b3a';
+            for (let i = 0; i < 3; i++) {
+                const lx = ((r * 53 + i * 97) % (COLS * 8)) / (COLS * 8) * W;
+                ctx.beginPath();
+                ctx.ellipse(lx, sy + rowH - 3 * scale, 3 * scale, 2 * scale, (r + i) * 0.5, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            break;
+        case 'dirtpath':
+            // Earthy dirt trail
+            ctx.fillStyle = '#8b7355';
+            ctx.fillRect(0, sy, W, rowH + 1);
+            // Dirt texture — scattered pebbles
+            ctx.fillStyle = '#9a8468';
+            for (let i = 0; i < COLS * 3; i++) {
+                const px = ((r * 41 + i * 67) % (COLS * 12)) / (COLS * 12) * W;
+                const py = sy + ((r * 23 + i * 51) % 10) / 10 * rowH;
+                ctx.beginPath();
+                ctx.arc(px, py, 1.5 * scale, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            // Edge grass tufts
+            ctx.fillStyle = '#4a7a35';
+            ctx.fillRect(0, sy, W, 3 * scale);
+            ctx.fillRect(0, sy + rowH - 3 * scale, W, 3 * scale);
+            break;
+        case 'stampede':
+            // Trampled ground
+            ctx.fillStyle = '#7a6b45';
+            ctx.fillRect(0, sy, W, rowH + 1);
+            // Hoofprints
+            ctx.fillStyle = '#6b5c38';
+            for (let i = 0; i < COLS; i++) {
+                const hx = ((r * 31 + i * 89) % (COLS * 8)) / (COLS * 8) * W;
+                ctx.beginPath();
+                ctx.ellipse(hx, sy + rowH * 0.5, 3 * scale, 4 * scale, 0, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            break;
+        case 'river':
+        case 'lilypad':
+            ctx.fillStyle = '#2a6b5a';
+            ctx.fillRect(0, sy, W, rowH + 1);
+            // Water ripples
+            ctx.strokeStyle = '#3a8b7055';
+            ctx.lineWidth = 1 * scale;
+            const waveOff = (lastTime * 30) % 20;
+            for (let i = -1; i < COLS + 2; i++) {
+                ctx.beginPath();
+                ctx.arc(i * TILE * scale + waveOff * scale, sy + rowH / 2, 8 * scale, 0, Math.PI);
+                ctx.stroke();
+            }
+            break;
+    }
+
+    // Draw objects
+    if (row.type === 'dirtpath') {
+        for (const v of row.objects) {
+            const vx = v.x * scale;
+            const vy = sy;
+            const vw = v.width * scale * pScale;
+            const vh = rowH;
+
+            if (v.isSnake) {
+                drawSnake(vx, vy, vw, vh, v, lastTime);
+            } else if (v.isAnt) {
+                drawFireAnts(vx, vy, vw, vh, lastTime);
+            }
+        }
+    } else if (row.type === 'stampede') {
+        // Warning: shaking ground
+        if (row.trainWarning) {
+            const shake = Math.sin(lastTime * 25) * 2 * scale;
+            // Dust clouds
+            ctx.fillStyle = `rgba(180,160,120,${0.3 + Math.sin(lastTime * 10) * 0.2})`;
+            for (let i = 0; i < 5; i++) {
+                const dx = ((i * 137 + r * 41) % COLS) * TILE * scale;
+                ctx.beginPath();
+                ctx.arc(dx + shake, sy + rowH * 0.4, 12 * scale, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            // Rumble indicator
+            ctx.fillStyle = '#ff880088';
+            ctx.font = `bold ${12 * scale}px monospace`;
+            ctx.textAlign = 'center';
+            ctx.fillText('!! STAMPEDE !!', W / 2 + shake, sy + 14 * scale);
+        }
+        // Deer stampede
+        if (row.trainActive) {
+            const tx = row.trainX * scale;
+            for (let i = 0; i < row.deerCount; i++) {
+                const dx = tx + i * TILE * 1.8 * scale;
+                drawDeer(dx, sy, rowH);
+            }
+            // Dust cloud behind
+            ctx.fillStyle = 'rgba(160,140,100,0.3)';
+            for (let i = 0; i < 6; i++) {
+                const dustX = row.trainDir > 0 ? tx - (20 + i * 15) * scale : tx + (row.deerCount * TILE * 1.8 + 20 + i * 15) * scale;
+                ctx.beginPath();
+                ctx.arc(dustX, sy + rowH * 0.7, (8 + i * 3) * scale, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+    } else if (row.type === 'river') {
+        for (const log of row.objects) {
+            const lx = log.x * scale;
+            const ly = sy + rowH * 0.15;
+            const lw = log.width * scale;
+            const lh = rowH * 0.7;
+
+            ctx.fillStyle = '#6b4e1e';
+            ctx.beginPath();
+            roundRect(ctx, lx, ly, lw, lh, 8 * scale);
+            ctx.fill();
+            // Bark texture
+            ctx.strokeStyle = '#5a3e14';
+            ctx.lineWidth = 1 * scale;
+            for (let i = 1; i < 4; i++) {
+                ctx.beginPath();
+                ctx.moveTo(lx + lw * i / 4, ly);
+                ctx.lineTo(lx + lw * i / 4, ly + lh);
+                ctx.stroke();
+            }
+            // Moss patches
+            ctx.fillStyle = '#4a7a35';
+            ctx.beginPath();
+            ctx.ellipse(lx + lw * 0.2, ly + 3 * scale, 6 * scale, 3 * scale, 0, 0, Math.PI * 2);
+            ctx.fill();
+            // Log ends
+            ctx.fillStyle = '#8a6830';
+            ctx.beginPath(); ctx.arc(lx + 4 * scale, ly + lh / 2, lh / 2 - 2 * scale, 0, Math.PI * 2); ctx.fill();
+            ctx.beginPath(); ctx.arc(lx + lw - 4 * scale, ly + lh / 2, lh / 2 - 2 * scale, 0, Math.PI * 2); ctx.fill();
+        }
+    } else if (row.type === 'lilypad') {
+        for (const pad of row.objects) {
+            const px = pad.x * scale + pad.width * scale / 2;
+            const py = sy + rowH / 2;
+            const pr = pad.width * scale / 2.2;
+
+            ctx.fillStyle = '#27ae60';
+            ctx.beginPath();
+            ctx.arc(px, py, pr, 0.1, Math.PI * 2 - 0.1);
+            ctx.lineTo(px, py);
+            ctx.fill();
+            // Vein
+            ctx.strokeStyle = '#219a52';
+            ctx.lineWidth = 1.5 * scale;
+            ctx.beginPath(); ctx.moveTo(px, py - pr * 0.8); ctx.lineTo(px, py + pr * 0.8); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(px - pr * 0.5, py - pr * 0.3); ctx.lineTo(px, py); ctx.lineTo(px - pr * 0.5, py + pr * 0.3); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(px + pr * 0.5, py - pr * 0.3); ctx.lineTo(px, py); ctx.lineTo(px + pr * 0.5, py + pr * 0.3); ctx.stroke();
+        }
+    }
+
+    // Draw trees (on forest rows, drawn on top)
+    if (row.treePositions) {
+        for (const tree of row.treePositions) {
+            drawTree(tree.col, sy, rowH, tree);
+        }
+    }
+
+    // Acorns
+    if (row.coins) {
+        for (const coin of row.coins) {
+            if (coin.collected) continue;
+            const cx = coin.col * TILE * scale + TILE * scale / 2;
+            const cy = sy + rowH / 2;
+            const bob = Math.sin(lastTime * 4 + r) * 3 * scale;
+
+            // Acorn cap
+            ctx.fillStyle = '#8b6914';
+            ctx.beginPath();
+            ctx.arc(cx, cy + bob - 4 * scale, 6 * scale, Math.PI, 0);
+            ctx.fill();
+            // Acorn cap texture
+            ctx.fillStyle = '#7a5c12';
+            ctx.beginPath();
+            ctx.arc(cx, cy + bob - 5 * scale, 5 * scale, Math.PI + 0.3, -0.3);
+            ctx.fill();
+            // Acorn body
+            ctx.fillStyle = '#c68c3c';
+            ctx.beginPath();
+            ctx.ellipse(cx, cy + bob + 2 * scale, 5 * scale, 7 * scale, 0, 0, Math.PI * 2);
+            ctx.fill();
+            // Stem
+            ctx.strokeStyle = '#5c3d1e';
+            ctx.lineWidth = 1.5 * scale;
+            ctx.beginPath();
+            ctx.moveTo(cx, cy + bob - 10 * scale);
+            ctx.lineTo(cx + 2 * scale, cy + bob - 14 * scale);
+            ctx.stroke();
+        }
+    }
+
+    ctx.restore();
+}
+
+function drawSnake(x, y, w, h, snake, time) {
+    const s = scale;
+    // Sinuous body
+    ctx.save();
+    ctx.strokeStyle = snake.color;
+    ctx.lineWidth = 6 * s;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    const segments = 12;
+    for (let i = 0; i <= segments; i++) {
+        const t = i / segments;
+        const sx = x + t * w;
+        const sy = y + h / 2 + Math.sin(t * Math.PI * 3 + time * 5 + snake.waveOffset) * 8 * s;
+        if (i === 0) ctx.moveTo(sx, sy);
+        else ctx.lineTo(sx, sy);
+    }
+    ctx.stroke();
+
+    // Darker pattern on top
+    ctx.strokeStyle = shadeColor(snake.color, -30);
+    ctx.lineWidth = 3 * s;
+    ctx.beginPath();
+    for (let i = 0; i <= segments; i++) {
+        const t = i / segments;
+        const sx = x + t * w;
+        const sy = y + h / 2 + Math.sin(t * Math.PI * 3 + time * 5 + snake.waveOffset) * 8 * s - 1 * s;
+        if (i === 0) ctx.moveTo(sx, sy);
+        else ctx.lineTo(sx, sy);
+    }
+    ctx.stroke();
+
+    // Head
+    const headX = snake.speed > 0 ? x + w : x;
+    const headY = y + h / 2 + Math.sin((snake.speed > 0 ? 1 : 0) * Math.PI * 3 + time * 5 + snake.waveOffset) * 8 * s;
+    ctx.fillStyle = snake.color;
+    ctx.beginPath();
+    ctx.ellipse(headX, headY, 5 * s, 4 * s, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Eyes
+    ctx.fillStyle = '#ff0';
+    const eyeOff = snake.speed > 0 ? 2 * s : -2 * s;
+    ctx.beginPath(); ctx.arc(headX + eyeOff, headY - 2 * s, 1.5 * s, 0, Math.PI * 2); ctx.fill();
+    // Pupil
+    ctx.fillStyle = '#000';
+    ctx.beginPath(); ctx.arc(headX + eyeOff, headY - 2 * s, 0.7 * s, 0, Math.PI * 2); ctx.fill();
+    // Tongue
+    ctx.strokeStyle = '#c0392b';
+    ctx.lineWidth = 1 * s;
+    const tongueFlick = Math.sin(time * 12) > 0.3;
+    if (tongueFlick) {
+        const tDir = snake.speed > 0 ? 1 : -1;
+        ctx.beginPath();
+        ctx.moveTo(headX + tDir * 5 * s, headY);
+        ctx.lineTo(headX + tDir * 10 * s, headY - 2 * s);
+        ctx.moveTo(headX + tDir * 7 * s, headY);
+        ctx.lineTo(headX + tDir * 10 * s, headY + 2 * s);
+        ctx.stroke();
+    }
+
+    ctx.restore();
+}
+
+function drawFireAnts(x, y, w, h, time) {
+    const s = scale;
+    ctx.save();
+
+    // Ant trail / column
+    const antCount = 8;
+    for (let i = 0; i < antCount; i++) {
+        const t = i / antCount;
+        const ax = x + t * w;
+        const ay = y + h / 2 + Math.sin(t * 10 + time * 4) * 4 * s;
+        const legWiggle = Math.sin(time * 15 + i * 2) * 2 * s;
+
+        // Body segments
+        ctx.fillStyle = '#8b1a1a';
+        // Abdomen
+        ctx.beginPath();
+        ctx.ellipse(ax, ay, 3 * s, 2.5 * s, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // Thorax
+        ctx.beginPath();
+        ctx.ellipse(ax + 3.5 * s, ay - 0.5 * s, 2 * s, 1.8 * s, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // Head
+        ctx.fillStyle = '#6b1010';
+        ctx.beginPath();
+        ctx.arc(ax + 6 * s, ay - 1 * s, 1.8 * s, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Legs
+        ctx.strokeStyle = '#5a0e0e';
+        ctx.lineWidth = 0.5 * s;
+        for (let leg = 0; leg < 3; leg++) {
+            const legX = ax + leg * 2 * s;
+            ctx.beginPath();
+            ctx.moveTo(legX, ay + 2 * s);
+            ctx.lineTo(legX - 2 * s, ay + 5 * s + legWiggle);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(legX, ay - 2 * s);
+            ctx.lineTo(legX - 2 * s, ay - 5 * s - legWiggle);
+            ctx.stroke();
+        }
+
+        // Antennae
+        ctx.strokeStyle = '#5a0e0e';
+        ctx.lineWidth = 0.5 * s;
+        ctx.beginPath();
+        ctx.moveTo(ax + 7 * s, ay - 2 * s);
+        ctx.lineTo(ax + 9 * s, ay - 5 * s + legWiggle * 0.5);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(ax + 7 * s, ay - 1 * s);
+        ctx.lineTo(ax + 9 * s, ay - 4 * s - legWiggle * 0.5);
+        ctx.stroke();
+    }
+
+    ctx.restore();
+}
+
+function drawDeer(x, y, rowH) {
+    const s = scale * 0.8;
+    const bounce = Math.sin(lastTime * 12 + x * 0.01) * 5 * s;
+
+    ctx.save();
+    ctx.translate(x, y + rowH * 0.2 + bounce);
+
+    // Body
+    ctx.fillStyle = '#b8834a';
+    ctx.beginPath();
+    ctx.ellipse(0, 15 * s, 18 * s, 12 * s, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Neck
+    ctx.fillStyle = '#c49358';
+    ctx.fillRect(-5 * s, -2 * s, 10 * s, 18 * s);
+
+    // Head
+    ctx.fillStyle = '#c49358';
+    ctx.beginPath();
+    ctx.ellipse(0, -6 * s, 8 * s, 7 * s, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Antlers
+    ctx.strokeStyle = '#6b4226';
+    ctx.lineWidth = 2 * s;
+    ctx.beginPath();
+    ctx.moveTo(-4 * s, -12 * s);
+    ctx.lineTo(-8 * s, -24 * s);
+    ctx.lineTo(-12 * s, -22 * s);
+    ctx.moveTo(-8 * s, -20 * s);
+    ctx.lineTo(-5 * s, -26 * s);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(4 * s, -12 * s);
+    ctx.lineTo(8 * s, -24 * s);
+    ctx.lineTo(12 * s, -22 * s);
+    ctx.moveTo(8 * s, -20 * s);
+    ctx.lineTo(5 * s, -26 * s);
+    ctx.stroke();
+
+    // Eye
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.arc(-3 * s, -7 * s, 1.5 * s, 0, Math.PI * 2);
+    ctx.fill();
+
+    // White tail spot
+    ctx.fillStyle = '#f0e6d0';
+    ctx.beginPath();
+    ctx.ellipse(15 * s, 12 * s, 5 * s, 6 * s, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Legs (running pose)
+    ctx.fillStyle = '#a07040';
+    const legPhase = Math.sin(lastTime * 14 + x * 0.02);
+    // Front legs
+    ctx.save();
+    ctx.translate(-8 * s, 24 * s);
+    ctx.rotate(legPhase * 0.4);
+    ctx.fillRect(-2 * s, 0, 4 * s, 16 * s);
+    ctx.restore();
+    ctx.save();
+    ctx.translate(8 * s, 24 * s);
+    ctx.rotate(-legPhase * 0.4);
+    ctx.fillRect(-2 * s, 0, 4 * s, 16 * s);
+    ctx.restore();
+
+    // Hooves
+    ctx.fillStyle = '#3a2a1a';
+    ctx.fillRect(-10 * s + legPhase * 4 * s, 38 * s, 4 * s, 3 * s);
+    ctx.fillRect(6 * s - legPhase * 4 * s, 38 * s, 4 * s, 3 * s);
+
+    ctx.restore();
+}
+
+function drawChipmunk(x, y, hopT, alive) {
+    const sx = x * scale + TILE * scale / 2;
+    const baseY = screenY(Math.round(y / TILE)) + TILE * scale / 2;
+    const sy = baseY;
+
+    let hopArc = 0;
+    let squish = 1;
+    if (game.player.hopping) {
+        const t = game.player.hopTime / game.player.hopDuration;
+        hopArc = Math.sin(t * Math.PI) * 15 * scale;
+        if (t > 0.8) squish = 1 + (1 - t) * 0.5;
+    }
+
+    const s = scale * 0.9;
+
+    ctx.save();
+    ctx.translate(sx, sy - hopArc);
+    ctx.scale(squish > 1 ? 1 + (squish - 1) * 0.3 : 1, squish);
+
+    if (!alive) { ctx.globalAlpha = 0.6; }
+
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.beginPath();
+    ctx.ellipse(0, 18 * s + hopArc * 0.5, 16 * s, 5 * s, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Tail (behind body)
+    ctx.fillStyle = '#8B6914';
+    ctx.beginPath();
+    ctx.moveTo(-2 * s, -8 * s);
+    ctx.quadraticCurveTo(-12 * s, -35 * s, -4 * s, -40 * s);
+    ctx.quadraticCurveTo(4 * s, -42 * s, 6 * s, -30 * s);
+    ctx.quadraticCurveTo(6 * s, -18 * s, 2 * s, -8 * s);
+    ctx.fill();
+    ctx.fillStyle = '#d4a854';
+    ctx.beginPath();
+    ctx.moveTo(-4 * s, -35 * s);
+    ctx.quadraticCurveTo(-2 * s, -42 * s, 4 * s, -38 * s);
+    ctx.quadraticCurveTo(5 * s, -35 * s, 2 * s, -30 * s);
+    ctx.fill();
+
+    // Body
+    ctx.fillStyle = '#a0724e';
+    ctx.beginPath();
+    ctx.ellipse(0, 4 * s, 14 * s, 18 * s, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Back stripes
+    ctx.fillStyle = '#5c3d2e';
+    ctx.fillRect(-2 * s, -12 * s, 4 * s, 22 * s);
+    ctx.fillStyle = '#f5e6c8';
+    ctx.fillRect(-5 * s, -10 * s, 2 * s, 18 * s);
+    ctx.fillRect(3 * s, -10 * s, 2 * s, 18 * s);
+
+    // Head
+    ctx.fillStyle = '#b8845a';
+    ctx.beginPath();
+    ctx.ellipse(0, -14 * s, 11 * s, 10 * s, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Cheeks (puffy)
+    ctx.fillStyle = '#deb887';
+    ctx.beginPath();
+    ctx.ellipse(-9 * s, -11 * s, 6 * s, 5 * s, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(9 * s, -11 * s, 6 * s, 5 * s, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Ears
+    ctx.fillStyle = '#8B6914';
+    ctx.beginPath(); ctx.arc(-8 * s, -22 * s, 4 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(8 * s, -22 * s, 4 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#e8c89e';
+    ctx.beginPath(); ctx.arc(-8 * s, -22 * s, 2.5 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(8 * s, -22 * s, 2.5 * s, 0, Math.PI * 2); ctx.fill();
+
+    // Eyes
+    ctx.fillStyle = '#000';
+    ctx.beginPath(); ctx.arc(-4 * s, -16 * s, 2.5 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(4 * s, -16 * s, 2.5 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(-3 * s, -17 * s, 1 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(5 * s, -17 * s, 1 * s, 0, Math.PI * 2); ctx.fill();
+
+    // Nose
+    ctx.fillStyle = '#4a2818';
+    ctx.beginPath();
+    ctx.ellipse(0, -12 * s, 2 * s, 1.5 * s, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Mouth
+    ctx.strokeStyle = '#5c3d2e';
+    ctx.lineWidth = 1 * s;
+    ctx.beginPath();
+    ctx.arc(0, -10 * s, 2 * s, 0.2, Math.PI - 0.2);
+    ctx.stroke();
+
+    // Paws
+    ctx.fillStyle = '#c69c6d';
+    ctx.beginPath();
+    ctx.ellipse(-8 * s, 16 * s, 4 * s, 3 * s, -0.3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(8 * s, 16 * s, 4 * s, 3 * s, 0.3, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+}
+
+function drawSadChipmunk(cx, cy) {
+    const s = scale * 2;
+    ctx.save();
+    ctx.translate(cx, cy);
+
+    // Tail (behind body)
+    ctx.fillStyle = '#8B6914';
+    ctx.beginPath();
+    ctx.moveTo(-2 * s, -8 * s);
+    ctx.quadraticCurveTo(-14 * s, -40 * s, -5 * s, -46 * s);
+    ctx.quadraticCurveTo(5 * s, -48 * s, 7 * s, -34 * s);
+    ctx.quadraticCurveTo(7 * s, -20 * s, 2 * s, -8 * s);
+    ctx.fill();
+    // Tail lighter tip
+    ctx.fillStyle = '#d4a854';
+    ctx.beginPath();
+    ctx.moveTo(-5 * s, -40 * s);
+    ctx.quadraticCurveTo(-2 * s, -48 * s, 5 * s, -44 * s);
+    ctx.quadraticCurveTo(6 * s, -40 * s, 3 * s, -34 * s);
+    ctx.fill();
+
+    // Body
+    ctx.fillStyle = '#a0724e';
+    ctx.beginPath();
+    ctx.ellipse(0, 10 * s, 20 * s, 25 * s, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Back stripes
+    ctx.fillStyle = '#5c3d2e';
+    ctx.fillRect(-3 * s, -12 * s, 6 * s, 30 * s);
+    ctx.fillStyle = '#f5e6c8';
+    ctx.fillRect(-7 * s, -10 * s, 3 * s, 26 * s);
+    ctx.fillRect(4 * s, -10 * s, 3 * s, 26 * s);
+
+    // Head
+    ctx.fillStyle = '#b8845a';
+    ctx.beginPath();
+    ctx.ellipse(0, -18 * s, 16 * s, 14 * s, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Cheeks
+    ctx.fillStyle = '#deb887';
+    ctx.beginPath(); ctx.ellipse(-12 * s, -14 * s, 8 * s, 6 * s, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(12 * s, -14 * s, 8 * s, 6 * s, 0, 0, Math.PI * 2); ctx.fill();
+
+    // Ears
+    ctx.fillStyle = '#8B6914';
+    ctx.beginPath(); ctx.arc(-11 * s, -30 * s, 5 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(11 * s, -30 * s, 5 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#e8c89e';
+    ctx.beginPath(); ctx.arc(-11 * s, -30 * s, 3 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(11 * s, -30 * s, 3 * s, 0, Math.PI * 2); ctx.fill();
+
+    // Sad eyes
+    ctx.fillStyle = '#000';
+    ctx.beginPath(); ctx.arc(-6 * s, -22 * s, 3.5 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(6 * s, -22 * s, 3.5 * s, 0, Math.PI * 2); ctx.fill();
+    // Eye shine
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(-5 * s, -23 * s, 1.2 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(7 * s, -23 * s, 1.2 * s, 0, Math.PI * 2); ctx.fill();
+
+    // Sad eyebrows
+    ctx.strokeStyle = '#5c3d2e';
+    ctx.lineWidth = 2 * s;
+    ctx.beginPath(); ctx.moveTo(-10 * s, -28 * s); ctx.lineTo(-3 * s, -26 * s); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(10 * s, -28 * s); ctx.lineTo(3 * s, -26 * s); ctx.stroke();
+
+    // Tear
+    ctx.fillStyle = '#5dade2';
+    ctx.beginPath(); ctx.ellipse(-8 * s, -17 * s, 2 * s, 3 * s, 0, 0, Math.PI * 2); ctx.fill();
+
+    // Nose
+    ctx.fillStyle = '#4a2818';
+    ctx.beginPath(); ctx.ellipse(0, -16 * s, 3 * s, 2 * s, 0, 0, Math.PI * 2); ctx.fill();
+
+    // Sad mouth
+    ctx.strokeStyle = '#5c3d2e';
+    ctx.lineWidth = 2 * s;
+    ctx.beginPath();
+    ctx.arc(0, -8 * s, 4 * s, Math.PI + 0.3, -0.3);
+    ctx.stroke();
+
+    // Paws
+    ctx.fillStyle = '#c69c6d';
+    ctx.beginPath(); ctx.ellipse(-12 * s, 28 * s, 6 * s, 4 * s, -0.3, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(12 * s, 28 * s, 6 * s, 4 * s, 0.3, 0, Math.PI * 2); ctx.fill();
+
+    ctx.restore();
+}
+
+function drawHawk(x, y) {
+    const sx = x * scale;
+    const sy = screenY(Math.round(y / TILE));
+    const s = scale * 1.8;
+    const wingT = lastTime * 8;
+    const wingFlap = Math.sin(wingT) * 18 * s;
+    const wingFlap2 = Math.sin(wingT + 0.3) * 14 * s; // secondary feather lag
+
+    ctx.save();
+    ctx.translate(sx + TILE * scale / 2, sy);
+
+    // Ground shadow — large oval
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.beginPath();
+    ctx.ellipse(0, 35 * s, 30 * s, 9 * s, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // === Tail feathers (behind body) ===
+    ctx.fillStyle = '#2a1a0e';
+    ctx.beginPath();
+    ctx.moveTo(-6 * s, -2 * s);
+    ctx.lineTo(-3 * s, 16 * s);
+    ctx.lineTo(0, 18 * s);
+    ctx.lineTo(3 * s, 16 * s);
+    ctx.lineTo(6 * s, -2 * s);
+    ctx.fill();
+    // Tail fan lines
+    ctx.strokeStyle = '#1a1008';
+    ctx.lineWidth = 0.8 * s;
+    for (let i = -2; i <= 2; i++) {
+        ctx.beginPath();
+        ctx.moveTo(i * 2 * s, 0);
+        ctx.lineTo(i * 1.5 * s, 16 * s);
+        ctx.stroke();
+    }
+
+    // === Wings (large, detailed) ===
+    // Left wing
+    ctx.fillStyle = '#3a2515';
+    ctx.beginPath();
+    ctx.moveTo(-8 * s, -18 * s);
+    ctx.quadraticCurveTo(-25 * s, -28 * s - wingFlap, -48 * s, -22 * s - wingFlap);
+    ctx.lineTo(-50 * s, -18 * s - wingFlap2);
+    ctx.lineTo(-44 * s, -14 * s - wingFlap2);
+    ctx.lineTo(-38 * s, -16 * s - wingFlap2);
+    ctx.lineTo(-32 * s, -12 * s - wingFlap2);
+    ctx.lineTo(-8 * s, -8 * s);
+    ctx.closePath();
+    ctx.fill();
+    // Wing top layer (lighter brown)
+    ctx.fillStyle = '#5a3a20';
+    ctx.beginPath();
+    ctx.moveTo(-8 * s, -18 * s);
+    ctx.quadraticCurveTo(-22 * s, -26 * s - wingFlap * 0.8, -38 * s, -22 * s - wingFlap * 0.9);
+    ctx.lineTo(-28 * s, -14 * s - wingFlap2 * 0.7);
+    ctx.lineTo(-8 * s, -12 * s);
+    ctx.closePath();
+    ctx.fill();
+    // Wing feather lines
+    ctx.strokeStyle = '#2a1a0e';
+    ctx.lineWidth = 0.7 * s;
+    for (let i = 0; i < 5; i++) {
+        const t = (i + 1) / 6;
+        const fx = -8 * s + (-42 * s + 8 * s) * t;
+        const fy1 = -18 * s + (-22 * s + 18 * s) * t - wingFlap * t;
+        const fy2 = -8 * s + (-12 * s + 8 * s) * t - wingFlap2 * t * 0.5;
+        ctx.beginPath(); ctx.moveTo(fx, fy1); ctx.lineTo(fx + 3 * s, fy2); ctx.stroke();
+    }
+
+    // Right wing (mirror)
+    ctx.fillStyle = '#3a2515';
+    ctx.beginPath();
+    ctx.moveTo(8 * s, -18 * s);
+    ctx.quadraticCurveTo(25 * s, -28 * s - wingFlap, 48 * s, -22 * s - wingFlap);
+    ctx.lineTo(50 * s, -18 * s - wingFlap2);
+    ctx.lineTo(44 * s, -14 * s - wingFlap2);
+    ctx.lineTo(38 * s, -16 * s - wingFlap2);
+    ctx.lineTo(32 * s, -12 * s - wingFlap2);
+    ctx.lineTo(8 * s, -8 * s);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = '#5a3a20';
+    ctx.beginPath();
+    ctx.moveTo(8 * s, -18 * s);
+    ctx.quadraticCurveTo(22 * s, -26 * s - wingFlap * 0.8, 38 * s, -22 * s - wingFlap * 0.9);
+    ctx.lineTo(28 * s, -14 * s - wingFlap2 * 0.7);
+    ctx.lineTo(8 * s, -12 * s);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#2a1a0e';
+    for (let i = 0; i < 5; i++) {
+        const t = (i + 1) / 6;
+        const fx = 8 * s + (42 * s - 8 * s) * t;
+        const fy1 = -18 * s + (-22 * s + 18 * s) * t - wingFlap * t;
+        const fy2 = -8 * s + (-12 * s + 8 * s) * t - wingFlap2 * t * 0.5;
+        ctx.beginPath(); ctx.moveTo(fx, fy1); ctx.lineTo(fx - 3 * s, fy2); ctx.stroke();
+    }
+
+    // === Body ===
+    ctx.fillStyle = '#3a2010';
+    ctx.beginPath();
+    ctx.ellipse(0, -16 * s, 10 * s, 16 * s, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Breast — lighter golden-brown
+    ctx.fillStyle = '#8b6a3a';
+    ctx.beginPath();
+    ctx.ellipse(0, -12 * s, 7 * s, 10 * s, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Breast streaks
+    ctx.strokeStyle = '#5a3a1a';
+    ctx.lineWidth = 0.6 * s;
+    for (let i = 0; i < 4; i++) {
+        const bx = -3 * s + i * 2 * s;
+        ctx.beginPath();
+        ctx.moveTo(bx, -18 * s);
+        ctx.lineTo(bx + 0.5 * s, -6 * s);
+        ctx.stroke();
+    }
+
+    // === Neck ===
+    ctx.fillStyle = '#f5f0e8';
+    ctx.beginPath();
+    ctx.ellipse(0, -28 * s, 6 * s, 6 * s, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // === Head — iconic white bald eagle head ===
+    ctx.fillStyle = '#f5f0e8';
+    ctx.beginPath();
+    ctx.ellipse(0, -36 * s, 9 * s, 8 * s, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Feather texture on head
+    ctx.fillStyle = '#e8e0d0';
+    ctx.beginPath();
+    ctx.ellipse(-3 * s, -38 * s, 4 * s, 3 * s, -0.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(3 * s, -38 * s, 4 * s, 3 * s, 0.2, 0, Math.PI * 2);
+    ctx.fill();
+
+    // === Brow ridge (fierce look) ===
+    ctx.fillStyle = '#f5f0e8';
+    ctx.beginPath();
+    ctx.moveTo(-7 * s, -38 * s);
+    ctx.lineTo(-3 * s, -40 * s);
+    ctx.lineTo(0, -39 * s);
+    ctx.lineTo(3 * s, -40 * s);
+    ctx.lineTo(7 * s, -38 * s);
+    ctx.lineTo(0, -37 * s);
+    ctx.closePath();
+    ctx.fill();
+
+    // === Eyes — fierce, piercing ===
+    // Eye sockets (dark)
+    ctx.fillStyle = '#2a1a0e';
+    ctx.beginPath(); ctx.ellipse(-4 * s, -36 * s, 3 * s, 2.5 * s, -0.1, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(4 * s, -36 * s, 3 * s, 2.5 * s, 0.1, 0, Math.PI * 2); ctx.fill();
+    // Iris — golden yellow
+    ctx.fillStyle = '#e8b020';
+    ctx.beginPath(); ctx.arc(-4 * s, -36 * s, 2 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(4 * s, -36 * s, 2 * s, 0, Math.PI * 2); ctx.fill();
+    // Pupils
+    ctx.fillStyle = '#000';
+    ctx.beginPath(); ctx.arc(-4 * s, -36 * s, 1 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(4 * s, -36 * s, 1 * s, 0, Math.PI * 2); ctx.fill();
+    // Eye shine
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(-3.3 * s, -36.8 * s, 0.5 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(4.7 * s, -36.8 * s, 0.5 * s, 0, Math.PI * 2); ctx.fill();
+
+    // === Beak — large, hooked, bright yellow ===
+    ctx.fillStyle = '#f0b820';
+    ctx.beginPath();
+    ctx.moveTo(-3 * s, -34 * s);
+    ctx.lineTo(0, -33 * s);
+    ctx.lineTo(3 * s, -34 * s);
+    ctx.lineTo(2 * s, -30 * s);
+    ctx.quadraticCurveTo(0, -26 * s, -1 * s, -28 * s);
+    ctx.lineTo(-2 * s, -30 * s);
+    ctx.closePath();
+    ctx.fill();
+    // Beak hook
+    ctx.fillStyle = '#d0a010';
+    ctx.beginPath();
+    ctx.moveTo(0, -28 * s);
+    ctx.quadraticCurveTo(1 * s, -25 * s, 0, -24 * s);
+    ctx.lineTo(-1 * s, -26 * s);
+    ctx.closePath();
+    ctx.fill();
+    // Nostril
+    ctx.fillStyle = '#8a7010';
+    ctx.beginPath(); ctx.ellipse(0, -31 * s, 1 * s, 0.6 * s, 0, 0, Math.PI * 2); ctx.fill();
+
+    // === Talons (dangling below) ===
+    ctx.strokeStyle = '#d0a010';
+    ctx.lineWidth = 1.5 * s;
+    ctx.lineCap = 'round';
+    // Left foot
+    for (let i = -1; i <= 1; i++) {
+        ctx.beginPath();
+        ctx.moveTo(-5 * s, 2 * s);
+        ctx.lineTo(-5 * s + i * 2.5 * s, 12 * s);
+        ctx.quadraticCurveTo(-5 * s + i * 3 * s, 14 * s, -5 * s + i * 2 * s, 15 * s);
+        ctx.stroke();
+    }
+    // Right foot
+    for (let i = -1; i <= 1; i++) {
+        ctx.beginPath();
+        ctx.moveTo(5 * s, 2 * s);
+        ctx.lineTo(5 * s + i * 2.5 * s, 12 * s);
+        ctx.quadraticCurveTo(5 * s + i * 3 * s, 14 * s, 5 * s + i * 2 * s, 15 * s);
+        ctx.stroke();
+    }
+
+    ctx.restore();
+}
+
+function drawHUD() {
+    const pad = 12 * scale;
+    const fontSize = 20 * scale;
+
+    ctx.save();
+
+    // Score (top left)
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    ctx.beginPath();
+    roundRect(ctx, pad, pad, 80 * scale, 32 * scale, 8 * scale);
+    ctx.fill();
+    ctx.fillStyle = '#e8dcc8';
+    ctx.font = `bold ${fontSize}px monospace`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(game.score.toString(), pad + 10 * scale, pad + 16 * scale);
+
+    // Acorns (top right)
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    ctx.beginPath();
+    roundRect(ctx, W - pad - 90 * scale, pad, 90 * scale, 32 * scale, 8 * scale);
+    ctx.fill();
+
+    // Acorn icon
+    const acornX = W - pad - 76 * scale;
+    const acornY = pad + 16 * scale;
+    ctx.fillStyle = '#8b6914';
+    ctx.beginPath();
+    ctx.arc(acornX, acornY - 3 * scale, 6 * scale, Math.PI, 0);
+    ctx.fill();
+    ctx.fillStyle = '#c68c3c';
+    ctx.beginPath();
+    ctx.ellipse(acornX, acornY + 2 * scale, 5 * scale, 6 * scale, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#e8dcc8';
+    ctx.font = `bold ${fontSize}px monospace`;
+    ctx.textAlign = 'left';
+    ctx.fillText(game.coins.toString(), acornX + 12 * scale, acornY);
+
+    // Lives (hearts, top center)
+    if (game.lives > 0) {
+        const heartsY = pad + 16 * scale;
+        const heartSpacing = 22 * scale;
+        const totalW = game.lives * heartSpacing;
+        const startX = W / 2 - totalW / 2 + heartSpacing / 2;
+        for (let i = 0; i < game.lives; i++) {
+            const hx = startX + i * heartSpacing;
+            ctx.fillStyle = '#e05050';
+            ctx.beginPath();
+            ctx.moveTo(hx, heartsY - 3 * scale);
+            ctx.bezierCurveTo(hx - 6 * scale, heartsY - 10 * scale, hx - 12 * scale, heartsY - 1 * scale, hx, heartsY + 6 * scale);
+            ctx.bezierCurveTo(hx + 12 * scale, heartsY - 1 * scale, hx + 6 * scale, heartsY - 10 * scale, hx, heartsY - 3 * scale);
+            ctx.fill();
+        }
+    }
+
+    ctx.restore();
+}
+
+function drawSoundToggle() {
+    const btn = getSoundBtnBounds();
+    const cx = btn.x + btn.w / 2;
+    const cy = btn.y + btn.h / 2;
+    const s = scale;
+
+    ctx.save();
+    // Background circle
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.beginPath();
+    ctx.arc(cx, cy, btn.w / 2, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = soundEnabled ? '#e8dcc8' : '#8a7a6a';
+    ctx.strokeStyle = soundEnabled ? '#e8dcc8' : '#8a7a6a';
+    ctx.lineWidth = 2 * s;
+
+    // Speaker body
+    ctx.beginPath();
+    ctx.moveTo(cx - 6 * s, cy - 3 * s);
+    ctx.lineTo(cx - 2 * s, cy - 3 * s);
+    ctx.lineTo(cx + 3 * s, cy - 7 * s);
+    ctx.lineTo(cx + 3 * s, cy + 7 * s);
+    ctx.lineTo(cx - 2 * s, cy + 3 * s);
+    ctx.lineTo(cx - 6 * s, cy + 3 * s);
+    ctx.closePath();
+    ctx.fill();
+
+    if (soundEnabled) {
+        // Sound waves
+        ctx.beginPath();
+        ctx.arc(cx + 5 * s, cy, 4 * s, -0.6, 0.6);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(cx + 5 * s, cy, 8 * s, -0.5, 0.5);
+        ctx.stroke();
+    } else {
+        // X mark
+        ctx.beginPath();
+        ctx.moveTo(cx + 5 * s, cy - 5 * s);
+        ctx.lineTo(cx + 11 * s, cy + 5 * s);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(cx + 11 * s, cy - 5 * s);
+        ctx.lineTo(cx + 5 * s, cy + 5 * s);
+        ctx.stroke();
+    }
+
+    ctx.restore();
+}
+
+function drawMenu() {
+    const now = lastTime;
+    const centerX = W / 2;
+
+    // Forest background
+    ctx.fillStyle = '#2a4a1e';
+    ctx.fillRect(0, 0, W, H);
+
+    // Gradient overlay — darker at bottom
+    const grad = ctx.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, 'rgba(60,100,40,0.3)');
+    grad.addColorStop(0.5, 'rgba(30,60,20,0.1)');
+    grad.addColorStop(1, 'rgba(10,20,8,0.5)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+
+    // Background trees
+    ctx.save();
+    for (let i = 0; i < 12; i++) {
+        const tx = ((i * 73 + 17) % 11) / 11 * W;
+        const ty = ((i * 47 + 31) % 7) / 7 * H * 0.6 + H * 0.15;
+        const ts = scale * (0.4 + (i % 3) * 0.2);
+        ctx.globalAlpha = 0.15 + (i % 3) * 0.05;
+        ctx.fillStyle = i % 2 === 0 ? '#1a3a12' : '#2a4a1a';
+        if (i % 3 === 0) {
+            // Pine
+            ctx.beginPath();
+            ctx.moveTo(tx, ty - 50 * ts);
+            ctx.lineTo(tx - 20 * ts, ty);
+            ctx.lineTo(tx + 20 * ts, ty);
+            ctx.fill();
+        } else {
+            // Oak blob
+            ctx.beginPath();
+            ctx.arc(tx, ty - 20 * ts, 18 * ts, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        // Trunk
+        ctx.fillStyle = '#1a2a10';
+        ctx.fillRect(tx - 3 * ts, ty, 6 * ts, 20 * ts);
+    }
+    ctx.restore();
+
+    // Floating leaves
+    ctx.save();
+    for (const leaf of leaves) {
+        leaf.x += leaf.vx * 0.5;
+        leaf.y += leaf.vy * 0.5;
+        leaf.rot += leaf.rotV * 0.016;
+        if (leaf.y > VISIBLE_ROWS * TILE) { leaf.y = -10; leaf.x = Math.random() * COLS * TILE; }
+        if (leaf.x > COLS * TILE) leaf.x = 0;
+
+        const lx = leaf.x * scale;
+        const ly = leaf.y * scale;
+        ctx.save();
+        ctx.translate(lx, ly);
+        ctx.rotate(leaf.rot);
+        ctx.fillStyle = leaf.color;
+        ctx.globalAlpha = 0.4;
+        ctx.beginPath();
+        ctx.ellipse(0, 0, leaf.size * scale, leaf.size * 0.5 * scale, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+    }
+    ctx.restore();
+
+    // Title
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    // Title shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    ctx.font = `bold ${42 * scale}px monospace`;
+    ctx.fillText("CHIPPY'S", centerX + 2 * scale, H * 0.13 + 2 * scale);
+    ctx.fillText('CROSSING', centerX + 2 * scale, H * 0.13 + 46 * scale + 2 * scale);
+
+    // Title text
+    ctx.fillStyle = '#f0e8d0';
+    ctx.font = `bold ${42 * scale}px monospace`;
+    ctx.fillText("CHIPPY'S", centerX, H * 0.13);
+    ctx.fillStyle = '#8bc34a';
+    ctx.fillText('CROSSING', centerX, H * 0.13 + 46 * scale);
+
+    ctx.restore();
+
+    // Animated chipmunk (idle bounce)
+    ctx.save();
+    const chipBounce = Math.sin(now * 3) * 5 * scale;
+    const chipX = centerX;
+    const chipY = H * 0.38 + chipBounce;
+    const s = scale * 2.2;
+
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.2)';
+    ctx.beginPath();
+    ctx.ellipse(chipX, H * 0.38 + 28 * s, 20 * s, 6 * s, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Reuse chipmunk drawing at menu position
+    ctx.translate(chipX, chipY);
+
+    // Tail
+    ctx.fillStyle = '#8B6914';
+    ctx.beginPath();
+    ctx.moveTo(-2 * s, -8 * s);
+    ctx.quadraticCurveTo(-12 * s, -35 * s, -4 * s, -40 * s);
+    ctx.quadraticCurveTo(4 * s, -42 * s, 6 * s, -30 * s);
+    ctx.quadraticCurveTo(6 * s, -18 * s, 2 * s, -8 * s);
+    ctx.fill();
+    ctx.fillStyle = '#d4a854';
+    ctx.beginPath();
+    ctx.moveTo(-4 * s, -35 * s);
+    ctx.quadraticCurveTo(-2 * s, -42 * s, 4 * s, -38 * s);
+    ctx.quadraticCurveTo(5 * s, -35 * s, 2 * s, -30 * s);
+    ctx.fill();
+
+    // Body
+    ctx.fillStyle = '#a0724e';
+    ctx.beginPath();
+    ctx.ellipse(0, 4 * s, 14 * s, 18 * s, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#5c3d2e';
+    ctx.fillRect(-2 * s, -12 * s, 4 * s, 22 * s);
+    ctx.fillStyle = '#f5e6c8';
+    ctx.fillRect(-5 * s, -10 * s, 2 * s, 18 * s);
+    ctx.fillRect(3 * s, -10 * s, 2 * s, 18 * s);
+
+    // Head
+    ctx.fillStyle = '#b8845a';
+    ctx.beginPath();
+    ctx.ellipse(0, -14 * s, 11 * s, 10 * s, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#deb887';
+    ctx.beginPath(); ctx.ellipse(-9 * s, -11 * s, 6 * s, 5 * s, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(9 * s, -11 * s, 6 * s, 5 * s, 0, 0, Math.PI * 2); ctx.fill();
+
+    // Ears
+    ctx.fillStyle = '#8B6914';
+    ctx.beginPath(); ctx.arc(-8 * s, -22 * s, 4 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(8 * s, -22 * s, 4 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#e8c89e';
+    ctx.beginPath(); ctx.arc(-8 * s, -22 * s, 2.5 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(8 * s, -22 * s, 2.5 * s, 0, Math.PI * 2); ctx.fill();
+
+    // Eyes — happy/bright for menu
+    ctx.fillStyle = '#000';
+    ctx.beginPath(); ctx.arc(-4 * s, -16 * s, 2.5 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(4 * s, -16 * s, 2.5 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(-3 * s, -17 * s, 1 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(5 * s, -17 * s, 1 * s, 0, Math.PI * 2); ctx.fill();
+
+    // Nose
+    ctx.fillStyle = '#4a2818';
+    ctx.beginPath(); ctx.ellipse(0, -12 * s, 2 * s, 1.5 * s, 0, 0, Math.PI * 2); ctx.fill();
+
+    // Happy smile
+    ctx.strokeStyle = '#5c3d2e';
+    ctx.lineWidth = 1.2 * s;
+    ctx.beginPath();
+    ctx.arc(0, -10 * s, 3 * s, 0.2, Math.PI - 0.2);
+    ctx.stroke();
+
+    // Paws
+    ctx.fillStyle = '#c69c6d';
+    ctx.beginPath(); ctx.ellipse(-8 * s, 16 * s, 4 * s, 3 * s, -0.3, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(8 * s, 16 * s, 4 * s, 3 * s, 0.3, 0, Math.PI * 2); ctx.fill();
+
+    ctx.restore();
+
+    // Subtitle below chipmunk
+    ctx.fillStyle = '#8aaa60';
+    ctx.font = `bold ${20 * scale}px monospace`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('A forest adventure', centerX, H * 0.49);
+
+    // Play button
+    const btnW = 180 * scale;
+    const btnH = 50 * scale;
+    const btnX = centerX - btnW / 2;
+    const btnY = H * 0.52;
+    const pulse = 1 + Math.sin(now * 4) * 0.03;
+
+    ctx.save();
+    ctx.translate(centerX, btnY + btnH / 2);
+    ctx.scale(pulse, pulse);
+    ctx.translate(-centerX, -(btnY + btnH / 2));
+
+    // Button shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.beginPath();
+    roundRect(ctx, btnX + 2 * scale, btnY + 3 * scale, btnW, btnH, 12 * scale);
+    ctx.fill();
+
+    ctx.fillStyle = '#3a7d20';
+    ctx.beginPath();
+    roundRect(ctx, btnX, btnY, btnW, btnH, 12 * scale);
+    ctx.fill();
+
+    ctx.fillStyle = '#fff';
+    ctx.font = `bold ${22 * scale}px monospace`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('PLAY', centerX, btnY + btnH / 2);
+    ctx.restore();
+
+    // Best score
+    const best = parseInt(localStorage.getItem('chippy_best') || '0');
+    if (best > 0) {
+        ctx.fillStyle = '#c68c3c';
+        ctx.font = `bold ${14 * scale}px monospace`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(`Best: ${best}`, centerX, H * 0.52 + btnH + 20 * scale);
+    }
+
+    // How to Play button
+    const htpBtnW = 180 * scale;
+    const htpBtnH = 46 * scale;
+    const htpBtnX = centerX - htpBtnW / 2;
+    const htpBtnY = H * 0.66;
+
+    ctx.fillStyle = 'rgba(255,255,255,0.1)';
+    ctx.beginPath();
+    roundRect(ctx, htpBtnX, htpBtnY, htpBtnW, htpBtnH, 8 * scale);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+    ctx.lineWidth = 1.5 * scale;
+    ctx.beginPath();
+    roundRect(ctx, htpBtnX, htpBtnY, htpBtnW, htpBtnH, 8 * scale);
+    ctx.stroke();
+
+    ctx.fillStyle = '#c8b898';
+    ctx.font = `bold ${17 * scale}px monospace`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('HOW TO PLAY', centerX, htpBtnY + htpBtnH / 2);
+
+    // Expanded instructions panel
+    if (showHowToPlay) {
+        const panelY = htpBtnY + htpBtnH + 8 * scale;
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.beginPath();
+        roundRect(ctx, W * 0.08, panelY, W * 0.84, 100 * scale, 8 * scale);
+        ctx.fill();
+
+        ctx.fillStyle = '#c8b898';
+        ctx.font = `${13 * scale}px monospace`;
+        ctx.fillText('Arrow keys / WASD to move', centerX, panelY + 20 * scale);
+        ctx.fillText('Tap to hop, swipe to turn', centerX, panelY + 40 * scale);
+        ctx.fillText('Dodge snakes, ants &', centerX, panelY + 60 * scale);
+        ctx.fillText('stampedes. Ride logs.', centerX, panelY + 78 * scale);
+        ctx.fillText('Collect acorns!', centerX, panelY + 96 * scale);
+    }
+
+    // Shop button
+    const shopBtnW = 180 * scale;
+    const shopBtnH = 46 * scale;
+    const shopBtnX = centerX - shopBtnW / 2;
+    const shopBtnY = H * 0.76;
+
+    ctx.fillStyle = 'rgba(200,168,72,0.15)';
+    ctx.beginPath();
+    roundRect(ctx, shopBtnX, shopBtnY, shopBtnW, shopBtnH, 10 * scale);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(200,168,72,0.4)';
+    ctx.lineWidth = 1.5 * scale;
+    ctx.beginPath();
+    roundRect(ctx, shopBtnX, shopBtnY, shopBtnW, shopBtnH, 10 * scale);
+    ctx.stroke();
+
+    ctx.fillStyle = '#f0d870';
+    ctx.font = `bold ${17 * scale}px monospace`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('SHOP', centerX - 10 * scale, shopBtnY + shopBtnH / 2);
+
+    // Acorn wallet preview next to shop text
+    ctx.fillStyle = '#c69c6d';
+    ctx.beginPath();
+    ctx.ellipse(centerX + 28 * scale, shopBtnY + shopBtnH / 2, 5 * scale, 6 * scale, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#8B6914';
+    ctx.beginPath();
+    ctx.arc(centerX + 28 * scale, shopBtnY + shopBtnH / 2 - 7 * scale, 4 * scale, Math.PI, 0);
+    ctx.fill();
+    ctx.fillStyle = '#f0d870';
+    ctx.font = `bold ${13 * scale}px monospace`;
+    ctx.fillText(`${acornWallet}`, centerX + 50 * scale, shopBtnY + shopBtnH / 2);
+
+    // Sound toggle switch
+    const sndY = H * 0.87 + 18 * scale;
+    const labelText = 'SOUND';
+    ctx.fillStyle = '#c8b898';
+    ctx.font = `bold ${17 * scale}px monospace`;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(labelText, centerX - 12 * scale, sndY);
+
+    // Switch track
+    const trackW = 56 * scale;
+    const trackH = 28 * scale;
+    const trackX = centerX + 2 * scale;
+    const trackY = sndY - trackH / 2;
+    const trackR = trackH / 2;
+
+    ctx.fillStyle = soundEnabled ? '#3a7d20' : '#4a4a4a';
+    ctx.beginPath();
+    roundRect(ctx, trackX, trackY, trackW, trackH, trackR);
+    ctx.fill();
+
+    // Switch track border
+    ctx.strokeStyle = soundEnabled ? '#5aa830' : '#666';
+    ctx.lineWidth = 1.5 * scale;
+    ctx.beginPath();
+    roundRect(ctx, trackX, trackY, trackW, trackH, trackR);
+    ctx.stroke();
+
+    // Switch knob
+    const knobR = (trackH - 4 * scale) / 2;
+    const knobX = soundEnabled ? trackX + trackW - knobR - 3 * scale : trackX + knobR + 3 * scale;
+    const knobY = sndY;
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(knobX, knobY, knobR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(0,0,0,0.1)';
+    ctx.beginPath();
+    ctx.arc(knobX, knobY + 1 * scale, knobR, 0, Math.PI * 2);
+    ctx.fill();
+
+}
+
+function drawShop() {
+    const centerX = W / 2;
+
+    // Dark forest background
+    ctx.fillStyle = '#1e3a14';
+    ctx.fillRect(0, 0, W, H);
+    const grad = ctx.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, 'rgba(40,80,30,0.3)');
+    grad.addColorStop(1, 'rgba(10,20,8,0.6)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+
+    // Title
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#f0e8d0';
+    ctx.font = `bold ${36 * scale}px monospace`;
+    ctx.fillText('SHOP', centerX, H * 0.08);
+
+    // Acorn wallet
+    ctx.fillStyle = '#c8a848';
+    ctx.font = `bold ${18 * scale}px monospace`;
+    // Draw acorn icon
+    const walletY = H * 0.15;
+    const aX = centerX - 40 * scale;
+    ctx.save();
+    ctx.fillStyle = '#8B6914';
+    ctx.beginPath();
+    ctx.arc(aX, walletY - 4 * scale, 6 * scale, Math.PI, 0);
+    ctx.fill();
+    ctx.fillStyle = '#c69c6d';
+    ctx.beginPath();
+    ctx.ellipse(aX, walletY + 2 * scale, 7 * scale, 9 * scale, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    ctx.fillStyle = '#f0d870';
+    ctx.fillText(`${acornWallet}`, centerX + 5 * scale, walletY);
+
+    // Divider
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(W * 0.1, H * 0.20);
+    ctx.lineTo(W * 0.9, H * 0.20);
+    ctx.stroke();
+
+    // Extra Lives section
+    ctx.fillStyle = '#c8b898';
+    ctx.font = `bold ${16 * scale}px monospace`;
+    ctx.fillText('EXTRA LIVES', centerX, H * 0.25);
+
+    // Show current lives purchased
+    const livesY = H * 0.30;
+    // Draw hearts for purchased lives
+    if (purchasedLives > 0) {
+        const heartSpacing = 30 * scale;
+        const totalW = purchasedLives * heartSpacing;
+        const startX = centerX - totalW / 2 + heartSpacing / 2;
+        for (let i = 0; i < purchasedLives; i++) {
+            const hx = startX + i * heartSpacing;
+            ctx.fillStyle = '#e05050';
+            ctx.beginPath();
+            ctx.moveTo(hx, livesY - 4 * scale);
+            ctx.bezierCurveTo(hx - 8 * scale, livesY - 13 * scale, hx - 16 * scale, livesY - 1 * scale, hx, livesY + 8 * scale);
+            ctx.bezierCurveTo(hx + 16 * scale, livesY - 1 * scale, hx + 8 * scale, livesY - 13 * scale, hx, livesY - 4 * scale);
+            ctx.fill();
+        }
+    } else {
+        ctx.fillStyle = '#6a6a6a';
+        ctx.font = `${13 * scale}px monospace`;
+        ctx.fillText('No lives yet', centerX, livesY);
+    }
+
+    // Buy life button
+    const cost = purchasedLives < MAX_LIVES ? LIFE_COSTS[purchasedLives] : 0;
+    const canBuy = purchasedLives < MAX_LIVES && acornWallet >= cost;
+    const maxed = purchasedLives >= MAX_LIVES;
+
+    const buyBtnW = 200 * scale;
+    const buyBtnH = 56 * scale;
+    const buyBtnX = centerX - buyBtnW / 2;
+    const buyBtnY = H * 0.42;
+
+    // Button background
+    ctx.fillStyle = maxed ? '#3a3a3a' : (canBuy ? '#3a7d20' : '#4a4a4a');
+    ctx.beginPath();
+    roundRect(ctx, buyBtnX, buyBtnY, buyBtnW, buyBtnH, 10 * scale);
+    ctx.fill();
+    ctx.strokeStyle = maxed ? '#555' : (canBuy ? '#5aa830' : '#666');
+    ctx.lineWidth = 1.5 * scale;
+    ctx.beginPath();
+    roundRect(ctx, buyBtnX, buyBtnY, buyBtnW, buyBtnH, 10 * scale);
+    ctx.stroke();
+
+    if (maxed) {
+        ctx.fillStyle = '#888';
+        ctx.font = `bold ${16 * scale}px monospace`;
+        ctx.fillText('MAX LIVES', centerX, buyBtnY + buyBtnH / 2);
+    } else {
+        // Heart icon on button
+        const bhx = centerX - 50 * scale;
+        const bhy = buyBtnY + buyBtnH / 2;
+        ctx.fillStyle = canBuy ? '#e05050' : '#6a4a4a';
+        ctx.beginPath();
+        ctx.moveTo(bhx, bhy - 4 * scale);
+        ctx.bezierCurveTo(bhx - 6 * scale, bhy - 10 * scale, bhx - 12 * scale, bhy - 1 * scale, bhx, bhy + 6 * scale);
+        ctx.bezierCurveTo(bhx + 12 * scale, bhy - 1 * scale, bhx + 6 * scale, bhy - 10 * scale, bhx, bhy - 4 * scale);
+        ctx.fill();
+
+        // "BUY" + cost
+        ctx.fillStyle = canBuy ? '#fff' : '#888';
+        ctx.font = `bold ${16 * scale}px monospace`;
+        ctx.fillText(`BUY  ${cost}`, centerX + 10 * scale, buyBtnY + buyBtnH / 2);
+
+        // Small acorn icon after cost
+        const acX = centerX + 55 * scale;
+        const acY = buyBtnY + buyBtnH / 2;
+        ctx.fillStyle = canBuy ? '#c69c6d' : '#666';
+        ctx.beginPath();
+        ctx.ellipse(acX, acY, 5 * scale, 6 * scale, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = canBuy ? '#8B6914' : '#555';
+        ctx.beginPath();
+        ctx.arc(acX, acY - 7 * scale, 4 * scale, Math.PI, 0);
+        ctx.fill();
+    }
+
+    // Redeem Code button
+    const codeBtnW = 180 * scale;
+    const codeBtnH = 40 * scale;
+    const codeBtnX = centerX - codeBtnW / 2;
+    const codeBtnY = H * 0.62;
+
+    ctx.fillStyle = 'rgba(180,140,60,0.15)';
+    ctx.beginPath();
+    roundRect(ctx, codeBtnX, codeBtnY, codeBtnW, codeBtnH, 8 * scale);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(200,168,72,0.35)';
+    ctx.lineWidth = 1.5 * scale;
+    ctx.beginPath();
+    roundRect(ctx, codeBtnX, codeBtnY, codeBtnW, codeBtnH, 8 * scale);
+    ctx.stroke();
+
+    ctx.fillStyle = '#d0b060';
+    ctx.font = `bold ${14 * scale}px monospace`;
+    ctx.fillText('REDEEM CODE', centerX, codeBtnY + codeBtnH / 2);
+
+    // Back button
+    const backBtnW = 150 * scale;
+    const backBtnH = 46 * scale;
+    const backBtnX = centerX - backBtnW / 2;
+    const backBtnY = H * 0.85;
+
+    ctx.fillStyle = 'rgba(255,255,255,0.1)';
+    ctx.beginPath();
+    roundRect(ctx, backBtnX, backBtnY, backBtnW, backBtnH, 10 * scale);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+    ctx.lineWidth = 1.5 * scale;
+    ctx.beginPath();
+    roundRect(ctx, backBtnX, backBtnY, backBtnW, backBtnH, 10 * scale);
+    ctx.stroke();
+
+    ctx.fillStyle = '#c8b898';
+    ctx.font = `bold ${17 * scale}px monospace`;
+    ctx.fillText('BACK', centerX, backBtnY + backBtnH / 2);
+
+    // Code entry popup overlay
+    if (showCodePopup) {
+        ctx.fillStyle = 'rgba(0,0,0,0.6)';
+        ctx.fillRect(0, 0, W, H);
+
+        const popW = W * 0.8;
+        const popH = 220 * scale;
+        const popX = centerX - popW / 2;
+        const popY = H / 2 - popH / 2;
+
+        // Popup background
+        ctx.fillStyle = '#2a3a1e';
+        ctx.beginPath();
+        roundRect(ctx, popX, popY, popW, popH, 12 * scale);
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(200,168,72,0.5)';
+        ctx.lineWidth = 2 * scale;
+        ctx.beginPath();
+        roundRect(ctx, popX, popY, popW, popH, 12 * scale);
+        ctx.stroke();
+
+        // Title
+        ctx.fillStyle = '#f0d870';
+        ctx.font = `bold ${18 * scale}px monospace`;
+        ctx.fillText(codeStep === 'code' ? 'ENTER CODE' : 'HOW MANY ACORNS?', centerX, popY + 30 * scale);
+
+        // Input box
+        const inputW = popW * 0.75;
+        const inputH = 36 * scale;
+        const inputX = centerX - inputW / 2;
+        const inputY = popY + 55 * scale;
+
+        ctx.fillStyle = '#1a2a12';
+        ctx.beginPath();
+        roundRect(ctx, inputX, inputY, inputW, inputH, 6 * scale);
+        ctx.fill();
+        ctx.strokeStyle = '#5a7a3a';
+        ctx.lineWidth = 1.5 * scale;
+        ctx.beginPath();
+        roundRect(ctx, inputX, inputY, inputW, inputH, 6 * scale);
+        ctx.stroke();
+
+        // Input text + blinking cursor
+        ctx.fillStyle = '#e8dcc8';
+        ctx.font = `bold ${16 * scale}px monospace`;
+        const cursor = Math.floor(lastTime * 2) % 2 === 0 ? '|' : '';
+        ctx.fillText(codeInput + cursor, centerX, inputY + inputH / 2);
+
+        // Submit button
+        const subW = 120 * scale;
+        const subH = 38 * scale;
+        const subX = centerX - subW / 2;
+        const subY = inputY + inputH + 15 * scale;
+
+        ctx.fillStyle = '#3a7d20';
+        ctx.beginPath();
+        roundRect(ctx, subX, subY, subW, subH, 8 * scale);
+        ctx.fill();
+        ctx.fillStyle = '#fff';
+        ctx.font = `bold ${15 * scale}px monospace`;
+        ctx.fillText('SUBMIT', centerX, subY + subH / 2);
+
+        // Cancel button
+        const canW = 100 * scale;
+        const canH = 32 * scale;
+        const canX = centerX - canW / 2;
+        const canY = subY + subH + 12 * scale;
+
+        ctx.fillStyle = 'rgba(255,255,255,0.08)';
+        ctx.beginPath();
+        roundRect(ctx, canX, canY, canW, canH, 6 * scale);
+        ctx.fill();
+        ctx.fillStyle = '#999';
+        ctx.font = `bold ${12 * scale}px monospace`;
+        ctx.fillText('CANCEL', centerX, canY + canH / 2);
+
+        // Message feedback
+        if (codeMessage === 'success') {
+            ctx.fillStyle = '#a0d880';
+            ctx.font = `bold ${14 * scale}px monospace`;
+            ctx.fillText(`+${codeReward} Acorns!`, centerX, canY + canH + 20 * scale);
+        } else if (codeMessage === 'wrong') {
+            ctx.fillStyle = '#e06060';
+            ctx.font = `bold ${14 * scale}px monospace`;
+            ctx.fillText(codeStep === 'code' ? 'Invalid code' : 'Enter a number', centerX, canY + canH + 20 * scale);
+        }
+    }
+}
+
+function drawGameOver() {
+    const elapsed = lastTime - game.gameOverTime;
+    const fade = Math.min(elapsed / 0.5, 0.75);
+
+    ctx.fillStyle = `rgba(10,15,10,${fade})`;
+    ctx.fillRect(0, 0, W, H);
+
+    if (elapsed < 0.3) return;
+
+    const centerX = W / 2;
+    const centerY = H * 0.35;
+
+    drawSadChipmunk(centerX, centerY);
+
+    const best = parseInt(localStorage.getItem('chippy_best') || '0');
+
+    ctx.fillStyle = '#e8dcc8';
+    ctx.font = `bold ${28 * scale}px monospace`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('GAME OVER', centerX, H * 0.56);
+
+    ctx.font = `${18 * scale}px monospace`;
+    ctx.fillText(`Score: ${game.score}`, centerX, H * 0.63);
+    ctx.fillText(`Acorns: ${game.coins}`, centerX, H * 0.68);
+
+    ctx.fillStyle = '#c68c3c';
+    ctx.font = `bold ${16 * scale}px monospace`;
+    ctx.fillText(`Best: ${best}`, centerX, H * 0.74);
+
+    // Try again button
+    const btnW = 160 * scale;
+    const btnH = 44 * scale;
+    const btnX = centerX - btnW / 2;
+    const btnY = H * 0.80;
+
+    const pulse = 1 + Math.sin(lastTime * 4) * 0.03;
+    ctx.save();
+    ctx.translate(centerX, btnY + btnH / 2);
+    ctx.scale(pulse, pulse);
+    ctx.translate(-centerX, -(btnY + btnH / 2));
+
+    ctx.fillStyle = '#3a7d20';
+    ctx.beginPath();
+    roundRect(ctx, btnX, btnY, btnW, btnH, 10 * scale);
+    ctx.fill();
+
+    ctx.fillStyle = '#fff';
+    ctx.font = `bold ${18 * scale}px monospace`;
+    ctx.fillText('TRY AGAIN', centerX, btnY + btnH / 2);
+
+    ctx.restore();
+
+    // Menu button
+    const menuBtnW = 160 * scale;
+    const menuBtnH = 36 * scale;
+    const menuBtnX = centerX - menuBtnW / 2;
+    const menuBtnY = btnY + btnH + 12 * scale;
+
+    ctx.fillStyle = 'rgba(255,255,255,0.12)';
+    ctx.beginPath();
+    roundRect(ctx, menuBtnX, menuBtnY, menuBtnW, menuBtnH, 8 * scale);
+    ctx.fill();
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+    ctx.lineWidth = 1.5 * scale;
+    ctx.beginPath();
+    roundRect(ctx, menuBtnX, menuBtnY, menuBtnW, menuBtnH, 8 * scale);
+    ctx.stroke();
+
+    ctx.fillStyle = '#c8b898';
+    ctx.font = `bold ${14 * scale}px monospace`;
+    ctx.fillText('MENU', centerX, menuBtnY + menuBtnH / 2);
+
+    // Sound toggle on game over screen
+    drawSoundToggle();
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.arcTo(x + w, y, x + w, y + r, r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+    ctx.lineTo(x + r, y + h);
+    ctx.arcTo(x, y + h, x, y + h - r, r);
+    ctx.lineTo(x, y + r);
+    ctx.arcTo(x, y, x + r, y, r);
+}
+
+function shadeColor(color, percent) {
+    const num = parseInt(color.replace('#',''), 16);
+    const amt = Math.round(2.55 * percent);
+    const R = Math.min(255, Math.max(0, (num >> 16) + amt));
+    const G = Math.min(255, Math.max(0, (num >> 8 & 0x00FF) + amt));
+    const B = Math.min(255, Math.max(0, (num & 0x0000FF) + amt));
+    return '#' + (0x1000000 + R * 0x10000 + G * 0x100 + B).toString(16).slice(1);
+}
+
+// --- Main Loop ---
+function render(timestamp) {
+    const now = timestamp / 1000;
+
+    if (gameState === 'menu') {
+        lastTime = now;
+        drawMenu();
+        requestAnimationFrame(render);
+        return;
+    }
+    if (gameState === 'shop') {
+        lastTime = now;
+        drawShop();
+        requestAnimationFrame(render);
+        return;
+    }
+
+    update(now);
+
+    // Clear + sky (forest canopy view)
+    ctx.fillStyle = getSkyColor(game.score);
+    ctx.fillRect(0, 0, W, H);
+
+    const p = game.player;
+    const minRow = Math.floor(game.cameraY / TILE) - 2;
+    const maxRow = minRow + VISIBLE_ROWS + 4;
+
+    // Draw rows back to front
+    for (let r = maxRow; r >= minRow; r--) {
+        drawRow(r);
+    }
+
+    // Draw chipmunk (flash when invincible)
+    const showChip = !(game.invincible > 0 && Math.floor(lastTime * 10) % 2 === 0);
+    if (showChip) drawChipmunk(p.x, p.y, 0, p.alive);
+
+    // Hawk
+    if (game.eagleActive) {
+        drawHawk(game.eagleX, game.eagleY);
+    }
+
+    drawHUD();
+
+    // Sound toggle during gameplay
+    if (gameState === 'playing') {
+        drawSoundToggle();
+    }
+
+    if (gameState === 'gameover') {
+        drawGameOver();
+    }
+
+    requestAnimationFrame(render);
+}
+
+// --- Start ---
+initGame(); // pre-generate rows for background, but don't start playing
+requestAnimationFrame(render);
+
+</script>
+</body>
+</html>
