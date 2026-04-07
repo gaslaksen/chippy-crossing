@@ -521,16 +521,21 @@ window.addEventListener('keyup', e => { keys[e.key] = false; });
 let touchStartX = 0, touchStartY = 0, touchStartTime = 0;
 canvas.addEventListener('touchstart', e => {
     e.preventDefault();
-    if (gameState === 'menu' || gameState === 'gameover' || gameState === 'shop') return;
-    ensureAudio(); startAmbient();
+    ensureAudio();
     const t = e.touches[0];
     touchStartX = t.clientX; touchStartY = t.clientY;
     touchStartTime = performance.now();
-});
+}, { passive: false });
 canvas.addEventListener('touchend', e => {
     e.preventDefault();
-    if (gameState === 'menu' || gameState === 'gameover' || gameState === 'shop') return;
     const t = e.changedTouches[0];
+    // On menu/shop/gameover screens, treat tap as a button click
+    if (gameState === 'menu' || gameState === 'gameover' || gameState === 'shop') {
+        const pos = clientToCanvas(t.clientX, t.clientY);
+        handleTap(pos.x, pos.y);
+        return;
+    }
+    startAmbient();
     const dx = t.clientX - touchStartX;
     const dy = t.clientY - touchStartY;
     const dist = Math.sqrt(dx*dx + dy*dy);
@@ -543,10 +548,10 @@ canvas.addEventListener('touchend', e => {
     } else {
         queueMove(0, dy < 0 ? 1 : -1);
     }
-});
+}, { passive: false });
 
-canvas.addEventListener('click', e => {
-    const pos = canvasCoords(e);
+function handleTap(px, py) {
+    const pos = { x: px, y: py };
     const sndBtn = getSoundBtnBounds();
 
     // Sound toggle — available on all screens
@@ -686,6 +691,20 @@ canvas.addEventListener('click', e => {
         }
         return;
     }
+}
+
+// Resolve clientX/clientY (mouse or touch) to canvas coordinates
+function clientToCanvas(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+        x: (clientX - rect.left) * (canvas.width / rect.width),
+        y: (clientY - rect.top) * (canvas.height / rect.height),
+    };
+}
+
+canvas.addEventListener('click', e => {
+    const pos = clientToCanvas(e.clientX, e.clientY);
+    handleTap(pos.x, pos.y);
 });
 
 // --- Update ---
