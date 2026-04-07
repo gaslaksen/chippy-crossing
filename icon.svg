@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180" width="180" height="180">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="40%" r="70%">
+      <stop offset="0%" stop-color="#5aa830"/>
+      <stop offset="100%" stop-color="#1e3a14"/>
+    </radialGradient>
+  </defs>
+  <rect width="180" height="180" fill="url(#bg)"/>
+  <g transform="translate(90,110)">
+    <!-- Tail -->
+    <path d="M -7,-29 Q -43,-126 -14,-144 Q 14,-151 22,-108 Q 22,-65 7,-29 Z" fill="#8B6914"/>
+    <path d="M -14,-126 Q -7,-151 14,-137 Q 18,-126 7,-108 Z" fill="#d4a854"/>
+    <!-- Body -->
+    <ellipse cx="0" cy="14" rx="50" ry="65" fill="#a0724e"/>
+    <!-- Stripes -->
+    <rect x="-7" y="-43" width="14" height="79" fill="#5c3d2e"/>
+    <rect x="-18" y="-36" width="7" height="65" fill="#f5e6c8"/>
+    <rect x="11" y="-36" width="7" height="65" fill="#f5e6c8"/>
+    <!-- Head -->
+    <ellipse cx="0" cy="-50" rx="40" ry="36" fill="#b8845a"/>
+    <!-- Cheeks -->
+    <ellipse cx="-32" cy="-40" rx="22" ry="18" fill="#deb887"/>
+    <ellipse cx="32" cy="-40" rx="22" ry="18" fill="#deb887"/>
+    <!-- Ears -->
+    <circle cx="-29" cy="-79" r="14" fill="#8B6914"/>
+    <circle cx="29" cy="-79" r="14" fill="#8B6914"/>
+    <circle cx="-29" cy="-79" r="9" fill="#e8c89e"/>
+    <circle cx="29" cy="-79" r="9" fill="#e8c89e"/>
+    <!-- Eyes -->
+    <circle cx="-14" cy="-58" r="9" fill="#000"/>
+    <circle cx="14" cy="-58" r="9" fill="#000"/>
+    <circle cx="-11" cy="-61" r="3.6" fill="#fff"/>
+    <circle cx="18" cy="-61" r="3.6" fill="#fff"/>
+    <!-- Nose -->
+    <ellipse cx="0" cy="-43" rx="7" ry="5" fill="#4a2818"/>
+    <!-- Smile -->
+    <path d="M -10,-36 Q 0,-25 10,-36" stroke="#5c3d2e" stroke-width="4" fill="none" stroke-linecap="round"/>
+  </g>
+</svg>
